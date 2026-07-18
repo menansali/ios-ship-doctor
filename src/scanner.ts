@@ -1,4 +1,4 @@
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join, extname, basename, relative } from "node:path";
 import { XMLParser } from "fast-xml-parser";
 import {
@@ -72,23 +72,24 @@ export async function parsePlist(path: string): Promise<any | null> {
 }
 
 /**
- * plist <dict> is parsed as parallel <key> and value arrays. This flattens the
- * top-level dict into a Map of key -> raw value node.
+ * Pair each <key> with the value element that immediately follows it, scanning
+ * the raw plist in document order. This is robust to mixed value types (string,
+ * true/false, numbers, nested dict/array) — unlike index-based pairing, which
+ * silently misaligns as soon as a non-string value appears between keys.
+ *
+ * Returns a Map of key -> string value ("" for boolean/array/dict/number nodes
+ * we don't need the payload of). Presence is `map.has(key)`.
  */
-function plistDictToMap(dictNode: any): Map<string, any> {
-  const map = new Map<string, any>();
-  if (!dictNode) return map;
-  const dict = Array.isArray(dictNode) ? dictNode[0] : dictNode;
-  if (!dict || typeof dict !== "object") return map;
-  const keys = ([] as any[]).concat(dict.key ?? []);
-  // Collect value nodes in document order is non-trivial with this parser, so we
-  // rely on the fact that for our checks we only need presence + string values,
-  // which we extract structurally below where needed. For usage-description keys
-  // (string values) we can match key->string by index.
-  const strings = ([] as any[]).concat(dict.string ?? []);
-  keys.forEach((k: string, i: number) => {
-    map.set(String(k), strings[i]);
-  });
+function parsePlistStringValues(raw: string): Map<string, string> {
+  const map = new Map<string, string>();
+  const re =
+    /<key>([^<]+)<\/key>\s*(?:<string>([\s\S]*?)<\/string>|<(?:true|false)\s*\/>|<(?:integer|real)>([\s\S]*?)<\/(?:integer|real)>|<(?:array|dict)\s*(?:\/>|>))/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw)) !== null) {
+    const key = m[1];
+    const value = m[2] ?? m[3] ?? "";
+    if (!map.has(key)) map.set(key, value);
+  }
   return map;
 }
 
@@ -339,8 +340,8 @@ export async function checkUsageDescriptions(projectPath: string): Promise<Findi
     ];
   }
 
-  const parsed = await parsePlist(layout.infoPlistPath);
-  const map = plistDictToMap(parsed?.plist?.dict);
+  const infoRaw = await safeRead(layout.infoPlistPath);
+  const map = parsePlistStringValues(infoRaw);
 
   // Gather all first-party + Podfile signatures to know which permissions are used.
   const sourceFiles = layout.appSourceDir ? await collectSourceFiles(layout.appSourceDir) : [];
@@ -404,53 +405,117 @@ const APPLE_LISTED_SDK_HINTS = [
 export async function auditDependencies(projectPath: string): Promise<Finding[]> {
   const layout = await resolveLayout(projectPath);
   const findings: Finding[] = [];
-  if (!layout.podsDir) {
-    findings.push({
-      severity: "info",
-      check: "dependencies",
-      title: "No Pods directory found",
-      detail: "Skipping CocoaPods dependency manifest audit (SwiftPM/manual frameworks are not scanned in this version).",
-    });
-    return findings;
-  }
+  let scannedSomething = false;
 
-  let pods;
-  try {
-    pods = await readdir(layout.podsDir, { withFileTypes: true });
-  } catch {
-    return findings;
-  }
-
-  for (const pod of pods) {
-    if (!pod.isDirectory()) continue;
-    if (["Target Support Files", "Headers", "Local Podspecs", "Manifest.lock"].includes(pod.name)) continue;
-    const podDir = join(layout.podsDir, pod.name);
-    // Does this pod contain any PrivacyInfo.xcprivacy anywhere inside it?
-    const hasManifest = await containsFile(podDir, "PrivacyInfo.xcprivacy");
-    const isListed = APPLE_LISTED_SDK_HINTS.some((h) =>
-      pod.name.toLowerCase().includes(h.toLowerCase())
-    );
-    if (!hasManifest && isListed) {
-      findings.push({
-        severity: "error",
-        check: "dependencies",
-        title: `SDK "${pod.name}" is on Apple's required-manifest list but ships no PrivacyInfo.xcprivacy`,
-        detail: "Apple requires this commonly-used SDK to include a signed privacy manifest. The build will be rejected.",
-        location: relative(layout.iosRoot, podDir),
-        fix: `Update ${pod.name} to a version that bundles a privacy manifest (most have shipped one since 2024).`,
-      });
+  // ── CocoaPods ──
+  if (layout.podsDir) {
+    scannedSomething = true;
+    let pods: any[] = [];
+    try {
+      pods = await readdir(layout.podsDir, { withFileTypes: true });
+    } catch {
+      /* ignore */
+    }
+    for (const pod of pods) {
+      if (!pod.isDirectory()) continue;
+      if (["Target Support Files", "Headers", "Local Podspecs", "Manifest.lock"].includes(pod.name)) continue;
+      const podDir = join(layout.podsDir, pod.name);
+      const hasManifest = await containsFile(podDir, "PrivacyInfo.xcprivacy");
+      const isListed = APPLE_LISTED_SDK_HINTS.some((h) => pod.name.toLowerCase().includes(h.toLowerCase()));
+      if (!hasManifest && isListed) {
+        findings.push({
+          severity: "error",
+          check: "dependencies",
+          title: `SDK "${pod.name}" (CocoaPods) is on Apple's required-manifest list but ships no PrivacyInfo.xcprivacy`,
+          detail: "Apple requires this commonly-used SDK to include a signed privacy manifest. The build will be rejected.",
+          location: relative(layout.iosRoot, podDir),
+          fix: `Update ${pod.name} to a version that bundles a privacy manifest (most have shipped one since 2024).`,
+        });
+      }
     }
   }
 
-  if (findings.length === 0) {
+  // ── Swift Package Manager ──
+  const resolved = await findPackageResolved(layout);
+  if (resolved) {
+    scannedSomething = true;
+    const names = await parseResolvedPackageNames(resolved);
+    for (const name of names) {
+      const isListed = APPLE_LISTED_SDK_HINTS.some((h) => name.toLowerCase().includes(h.toLowerCase()));
+      if (isListed) {
+        findings.push({
+          severity: "warning",
+          check: "dependencies",
+          title: `SwiftPM package "${name}" is on Apple's required-manifest list — verify it ships a privacy manifest`,
+          detail: "SwiftPM sources aren't checked into the repo, so Ship Doctor can't inspect the manifest directly. Older pinned versions may lack one.",
+          location: relative(layout.iosRoot, resolved),
+          fix: `Ensure ${name} is pinned to a version that bundles PrivacyInfo.xcprivacy (2024+).`,
+        });
+      }
+    }
+  }
+
+  if (!scannedSomething) {
+    findings.push({
+      severity: "info",
+      check: "dependencies",
+      title: "No CocoaPods or SwiftPM manifests found",
+      detail: "No Pods/ directory and no Package.resolved to audit.",
+    });
+  } else if (findings.length === 0) {
     findings.push({
       severity: "info",
       check: "dependencies",
       title: "Dependency privacy manifests look OK",
-      detail: "All Apple-listed SDKs found in Pods bundle a PrivacyInfo.xcprivacy.",
+      detail: "No Apple-listed SDK with a missing/unverifiable privacy manifest was found.",
     });
   }
   return findings;
+}
+
+/** Locate a Package.resolved in the usual SwiftPM spots. */
+async function findPackageResolved(layout: ProjectLayout): Promise<string | null> {
+  const candidates = [
+    join(layout.iosRoot, "Package.resolved"),
+    join(layout.iosRoot, "..", "Package.resolved"),
+  ];
+  // Also look inside any .xcodeproj/.xcworkspace under iosRoot.
+  try {
+    const entries = await readdir(layout.iosRoot, { withFileTypes: true });
+    for (const e of entries) {
+      if (e.isDirectory() && (e.name.endsWith(".xcodeproj") || e.name.endsWith(".xcworkspace"))) {
+        candidates.push(
+          join(layout.iosRoot, e.name, "project.xcworkspace", "xcshareddata", "swiftpm", "Package.resolved")
+        );
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  for (const c of candidates) {
+    try {
+      await stat(c);
+      return c;
+    } catch {
+      /* keep looking */
+    }
+  }
+  return null;
+}
+
+/** Parse package names out of a Package.resolved (v1 or v2 schema). */
+async function parseResolvedPackageNames(path: string): Promise<string[]> {
+  const raw = await safeRead(path);
+  if (!raw) return [];
+  try {
+    const json = JSON.parse(raw);
+    const pins = json.pins ?? json.object?.pins ?? [];
+    return pins
+      .map((p: any) => p.identity ?? p.package ?? "")
+      .filter((s: string) => s.length > 0);
+  } catch {
+    return [];
+  }
 }
 
 async function containsFile(dir: string, name: string, depth = 6): Promise<boolean> {
@@ -707,6 +772,224 @@ async function containsDir(root: string, name: string, depth = 6): Promise<boole
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CHECK 9: Launch screen
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function checkLaunchScreen(projectPath: string): Promise<Finding[]> {
+  const layout = await resolveLayout(projectPath);
+  if (!layout.infoPlistPath) return [];
+  const raw = await safeRead(layout.infoPlistPath);
+  const hasStoryboard = raw.includes("<key>UILaunchStoryboardName</key>");
+  const hasLaunchScreen = raw.includes("<key>UILaunchScreen</key>");
+  if (hasStoryboard || hasLaunchScreen) {
+    return [
+      {
+        severity: "info",
+        check: "launch-screen",
+        title: "Launch screen configured",
+        detail: "Info.plist declares a launch storyboard / launch screen.",
+      },
+    ];
+  }
+  return [
+    {
+      severity: "warning",
+      check: "launch-screen",
+      title: "No launch screen configured",
+      detail: "Apps without a launch storyboard render at a non-native resolution and are commonly rejected under the design guidelines.",
+      location: relative(layout.iosRoot, layout.infoPlistPath),
+      fix: "Add UILaunchStoryboardName (e.g. LaunchScreen) or a UILaunchScreen dict to Info.plist.",
+    },
+  ];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHECK 10: Version / build number sanity
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function checkVersionSanity(projectPath: string): Promise<Finding[]> {
+  const layout = await resolveLayout(projectPath);
+  if (!layout.infoPlistPath) return [];
+  const raw = await safeRead(layout.infoPlistPath);
+  const findings: Finding[] = [];
+  if (!raw.includes("<key>CFBundleShortVersionString</key>")) {
+    findings.push({
+      severity: "error",
+      check: "version-sanity",
+      title: "Missing CFBundleShortVersionString (marketing version)",
+      detail: "Every submitted build needs a marketing version string.",
+      location: relative(layout.iosRoot, layout.infoPlistPath),
+      fix: "Add <key>CFBundleShortVersionString</key><string>1.0.0</string> (or $(MARKETING_VERSION)).",
+    });
+  }
+  if (!raw.includes("<key>CFBundleVersion</key>")) {
+    findings.push({
+      severity: "error",
+      check: "version-sanity",
+      title: "Missing CFBundleVersion (build number)",
+      detail: "Every submitted build needs a build number.",
+      location: relative(layout.iosRoot, layout.infoPlistPath),
+      fix: "Add <key>CFBundleVersion</key><string>1</string> (or $(CURRENT_PROJECT_VERSION)).",
+    });
+  }
+  if (findings.length === 0) {
+    findings.push({
+      severity: "info",
+      check: "version-sanity",
+      title: "Version and build number present",
+      detail: "Both CFBundleShortVersionString and CFBundleVersion are set.",
+    });
+  }
+  return findings;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHECK 11: Deployment target (from Podfile, best-effort)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function checkDeploymentTarget(projectPath: string): Promise<Finding[]> {
+  const layout = await resolveLayout(projectPath);
+  const podfile = await safeRead(join(layout.iosRoot, "Podfile"));
+  const m = podfile.match(/platform\s+:ios,\s*['"](\d+)(?:\.\d+)?['"]/);
+  if (!m) return []; // no Podfile / not declared here — skip quietly
+  const major = parseInt(m[1], 10);
+  if (major < 13) {
+    return [
+      {
+        severity: "warning",
+        check: "deployment-target",
+        title: `Very old iOS deployment target (iOS ${m[1]})`,
+        detail: "Supporting very old iOS versions increases the surface for review issues and misses required-API behavior changes.",
+        location: "Podfile",
+        fix: "Consider raising platform :ios to a currently-supported minimum (13+).",
+      },
+    ];
+  }
+  return [
+    {
+      severity: "info",
+      check: "deployment-target",
+      title: `Deployment target iOS ${m[1]}`,
+      detail: "Minimum iOS version looks reasonable.",
+    },
+  ];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auto-fix: insert a key/value pair into a plist's top-level dict
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Insert `<key>…</key>\n<valueXml>` just before the top-level dict's closing tag.
+ * The top-level dict close is the last `</dict>` that appears before `</plist>`.
+ * Returns the new document, or null if the key already exists / structure is odd.
+ */
+export function insertPlistKey(doc: string, key: string, valueXml: string): string | null {
+  if (doc.includes(`<key>${key}</key>`)) return null; // already present
+  const plistClose = doc.lastIndexOf("</plist>");
+  if (plistClose < 0) return null;
+  const dictClose = doc.lastIndexOf("</dict>", plistClose);
+  if (dictClose < 0) return null;
+  const before = doc.slice(0, dictClose);
+  const after = doc.slice(dictClose);
+  const snippet = `\t<key>${key}</key>\n\t${valueXml}\n`;
+  return `${before}${snippet}${after}`;
+}
+
+export interface AutoFixResult {
+  applied: { title: string; detail: string }[];
+  manual: { title: string; detail: string }[];
+  changedFiles: string[];
+}
+
+/**
+ * Apply the safe, unambiguous fixes:
+ *  - add ITSAppUsesNonExemptEncryption=false (HTTPS/TLS-only assumption)
+ *  - (re)generate PrivacyInfo.xcprivacy to cover detected required-reason APIs
+ *  - add stub NS…UsageDescription strings for detected permissions (flagged)
+ * Everything requiring a human decision (real AdMob ID, missing icon, UIWebView,
+ * dependency updates) is returned under `manual`.
+ */
+export async function applyAutoFixes(
+  projectPath: string,
+  opts: { addUsageStubs?: boolean } = {}
+): Promise<AutoFixResult> {
+  const layout = await resolveLayout(projectPath);
+  const result: AutoFixResult = { applied: [], manual: [], changedFiles: [] };
+
+  // 1) Export compliance key.
+  if (layout.infoPlistPath) {
+    let raw = await safeRead(layout.infoPlistPath);
+    let touched = false;
+
+    if (!raw.includes("<key>ITSAppUsesNonExemptEncryption</key>")) {
+      const next = insertPlistKey(raw, "ITSAppUsesNonExemptEncryption", "<false/>");
+      if (next) {
+        raw = next;
+        touched = true;
+        result.applied.push({
+          title: "Added ITSAppUsesNonExemptEncryption = false",
+          detail: "Assumes standard HTTPS/TLS only. If you ship custom/proprietary encryption, set this to true and file the paperwork.",
+        });
+      }
+    }
+
+    // 2) Usage-description stubs (opt-in; stubs still need real copy before review).
+    if (opts.addUsageStubs) {
+      const sourceFiles = layout.appSourceDir ? await collectSourceFiles(layout.appSourceDir) : [];
+      let corpus = "";
+      for (const f of sourceFiles) corpus += await safeRead(f);
+      corpus += await safeRead(join(layout.iosRoot, "Podfile"));
+      corpus += await safeRead(join(layout.iosRoot, "..", "package.json"));
+      for (const rule of USAGE_DESCRIPTION_RULES) {
+        const used = rule.signatures.some((s) => corpus.includes(s));
+        if (used && !raw.includes(`<key>${rule.key}</key>`)) {
+          const stub = `This app uses ${rule.label.toLowerCase()} to provide its core features.`;
+          const next = insertPlistKey(raw, rule.key, `<string>${stub}</string>`);
+          if (next) {
+            raw = next;
+            touched = true;
+            result.applied.push({
+              title: `Added ${rule.key} (stub)`,
+              detail: `Inserted a placeholder purpose string — REVIEW IT: "${stub}". Apple rejects vague strings, so tailor it to your actual feature.`,
+            });
+          }
+        }
+      }
+    }
+
+    if (touched) {
+      await writeFile(layout.infoPlistPath, raw, "utf8");
+      result.changedFiles.push(relative(layout.iosRoot, layout.infoPlistPath));
+    }
+  }
+
+  // 3) Privacy manifest.
+  const privacy = await scanPrivacyManifest(projectPath);
+  if (privacy.missing.length > 0 || !privacy.manifestExists) {
+    const { xml, targetPath, categories } = await buildPrivacyManifestXml(projectPath);
+    if (targetPath) {
+      await writeFile(targetPath, xml, "utf8");
+      result.changedFiles.push(relative(layout.iosRoot, targetPath));
+      result.applied.push({
+        title: `${privacy.manifestExists ? "Updated" : "Created"} PrivacyInfo.xcprivacy`,
+        detail: `Covers: ${categories.join(", ") || "no required-reason categories"}. Add it to the app target in Xcode if it's new.`,
+      });
+    }
+  }
+
+  // 4) Things a machine must not guess.
+  const traps = await checkCredentialTraps(projectPath);
+  for (const t of traps) result.manual.push({ title: t.title, detail: t.fix ?? t.detail });
+  const icon = await checkAppIcon(projectPath);
+  for (const f of icon) if (f.severity === "error") result.manual.push({ title: f.title, detail: f.fix ?? f.detail });
+  const dep = await checkDeprecatedApis(projectPath);
+  for (const f of dep) if (f.severity === "error") result.manual.push({ title: f.title, detail: f.fix ?? f.detail });
+
+  return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Aggregate preflight
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -715,15 +998,19 @@ export async function runPreflight(projectPath: string): Promise<{
   summary: { errors: number; warnings: number; infos: number; verdict: string };
 }> {
   const privacy = await scanPrivacyManifest(projectPath);
-  const [usage, deps, traps, exportComp, ats, icon, deprecated] = await Promise.all([
-    checkUsageDescriptions(projectPath),
-    auditDependencies(projectPath),
-    checkCredentialTraps(projectPath),
-    checkExportCompliance(projectPath),
-    checkAppTransportSecurity(projectPath),
-    checkAppIcon(projectPath),
-    checkDeprecatedApis(projectPath),
-  ]);
+  const [usage, deps, traps, exportComp, ats, icon, deprecated, launch, version, deployment] =
+    await Promise.all([
+      checkUsageDescriptions(projectPath),
+      auditDependencies(projectPath),
+      checkCredentialTraps(projectPath),
+      checkExportCompliance(projectPath),
+      checkAppTransportSecurity(projectPath),
+      checkAppIcon(projectPath),
+      checkDeprecatedApis(projectPath),
+      checkLaunchScreen(projectPath),
+      checkVersionSanity(projectPath),
+      checkDeploymentTarget(projectPath),
+    ]);
 
   const all = [
     ...privacy.findings,
@@ -734,6 +1021,9 @@ export async function runPreflight(projectPath: string): Promise<{
     ...ats,
     ...icon,
     ...deprecated,
+    ...launch,
+    ...version,
+    ...deployment,
   ];
   const order: Record<Severity, number> = { error: 0, warning: 1, info: 2 };
   all.sort((a, b) => order[a.severity] - order[b.severity]);

@@ -9,6 +9,7 @@ import {
   auditDependencies,
   checkCredentialTraps,
   buildPrivacyManifestXml,
+  applyAutoFixes,
   runPreflight,
   type Finding,
 } from "./scanner.js";
@@ -164,6 +165,32 @@ server.tool(
   }
 );
 
+// ── Tool: auto-fix ────────────────────────────────────────────────────────────
+server.tool(
+  "autofix",
+  "Apply the safe, unambiguous App Store fixes automatically: add ITSAppUsesNonExemptEncryption=false, (re)generate PrivacyInfo.xcprivacy to cover detected required-reason APIs, and (optionally) insert stub NS…UsageDescription strings. Anything a machine shouldn't guess (real AdMob ID, missing icon, UIWebView, dependency updates) is reported as manual follow-up. Modifies files on disk.",
+  {
+    ...projectPathArg,
+    addUsageStubs: z
+      .boolean()
+      .default(false)
+      .describe("Also insert placeholder NS…UsageDescription strings for detected permissions. The stubs MUST be reviewed — Apple rejects vague purpose strings."),
+  },
+  async ({ projectPath, addUsageStubs }) => {
+    const r = await applyAutoFixes(projectPath, { addUsageStubs });
+    const parts: string[] = [];
+    parts.push(
+      r.applied.length
+        ? `✅ Applied ${r.applied.length} fix(es):\n` + r.applied.map((a) => `   • ${a.title}\n     ${a.detail}`).join("\n")
+        : "No automatic fixes were needed."
+    );
+    if (r.changedFiles.length) parts.push(`📝 Changed files:\n` + r.changedFiles.map((f) => `   • ${f}`).join("\n"));
+    if (r.manual.length)
+      parts.push(`⚠️ Needs your attention (not auto-fixable):\n` + r.manual.map((m) => `   • ${m.title}\n     ${m.detail}`).join("\n"));
+    return { content: [{ type: "text", text: parts.join("\n\n") }] };
+  }
+);
+
 // ── App Store Connect: rejection recovery ─────────────────────────────────────
 
 /** Mint a fresh short-lived JWT using real wall-clock time. */
@@ -252,6 +279,32 @@ server.tool(
     };
   }
 );
+
+// ── CLI mode ──────────────────────────────────────────────────────────────────
+// `ios-ship-doctor-mcp preflight <path> [--json]` runs a one-shot check and exits
+// non-zero on blocking errors — handy for CI. With no args it starts the MCP server.
+const argv = process.argv.slice(2);
+if (argv[0] === "preflight") {
+  const json = argv.includes("--json");
+  const projectPath = argv.find((a, i) => i > 0 && !a.startsWith("--")) ?? process.cwd();
+  const { findings, summary } = await runPreflight(projectPath);
+  if (json) {
+    console.log(JSON.stringify({ projectPath, summary, findings }, null, 2));
+  } else {
+    console.log(`🩺 Ship Doctor — ${projectPath}\n${summary.verdict}\n(${summary.errors} errors, ${summary.warnings} warnings, ${summary.infos} passed)\n`);
+    console.log(renderFindings(findings));
+  }
+  process.exit(summary.errors > 0 ? 1 : 0);
+}
+if (argv[0] === "--help" || argv[0] === "-h") {
+  console.log(
+    `ios-ship-doctor-mcp\n\n` +
+      `  (no args)                 start the MCP server on stdio\n` +
+      `  preflight <path> [--json] run all checks once; exits 1 on blocking errors\n` +
+      `  --help                    show this message\n`
+  );
+  process.exit(0);
+}
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

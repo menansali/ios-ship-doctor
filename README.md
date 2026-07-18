@@ -6,9 +6,14 @@
 
 An [MCP](https://modelcontextprotocol.io) server that lets Claude diagnose why your iOS app will be rejected — privacy manifests, missing permission strings, unlisted SDKs, leftover test credentials — and then fix them. When Apple *does* reject you, it pulls the rejection and maps it to a plain-English fix.
 
+[![CI](https://github.com/menansali/ios-ship-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/menansali/ios-ship-doctor/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-black.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A518-black.svg)](https://nodejs.org)
 [![MCP](https://img.shields.io/badge/protocol-MCP-black.svg)](https://modelcontextprotocol.io)
+
+<br/>
+
+<img src="./assets/demo.svg" alt="Ship Doctor preflight output" width="720"/>
 
 </div>
 
@@ -81,8 +86,9 @@ VERDICT: NOT READY — 1 blocking issue will fail App Store review.
 | `audit_dependencies` | Apple-listed SDKs shipping without a `PrivacyInfo.xcprivacy` |
 | `check_credential_traps` | Placeholder / public test credentials in `Info.plist` |
 | `generate_privacy_manifest` | Writes a valid `PrivacyInfo.xcprivacy` covering every detected API |
+| `autofix` | Applies the safe fixes automatically; reports the rest as manual follow-up |
 
-`preflight` also checks **export compliance**, **App Transport Security**, **app-icon presence**, and **banned APIs** (`UIWebView`).
+`preflight` also checks **export compliance**, **App Transport Security**, **app-icon presence**, **banned APIs** (`UIWebView`), **launch screen**, **version/build sanity**, and **deployment target**. Dependency scanning covers both **CocoaPods and Swift Package Manager**.
 
 ### Rejection recovery — needs an App Store Connect API key
 
@@ -132,6 +138,17 @@ If you'd rather not use `npm link`, point Claude at the built file directly:
 
 `projectPath` in any tool can be your repo root (with an `ios/` folder) or the `ios/` directory itself.
 
+## Use it in CI (no Claude required)
+
+The same binary runs as a one-shot command that exits non-zero on blocking issues:
+
+```bash
+ios-ship-doctor-mcp preflight /path/to/app          # human-readable
+ios-ship-doctor-mcp preflight /path/to/app --json   # machine-readable
+```
+
+Copy [`examples/preflight-gate.yml`](./examples/preflight-gate.yml) into your app repo's `.github/workflows/` to **block PRs that would fail App Store review**.
+
 ## How it works
 
 - **Required-reason APIs** — scans first-party source for Apple's documented API signatures, then diffs against your declared `PrivacyInfo.xcprivacy`.
@@ -140,9 +157,12 @@ If you'd rather not use `npm link`, point Claude at the built file directly:
 
 ## Roadmap
 
-- [ ] Auto-fix tools (patch `Info.plist`, swap placeholder credentials)
-- [ ] More preflight checks: entitlements, min deployment target, launch screen, version sanity
-- [ ] SwiftPM dependency scanning (currently CocoaPods only)
+- [x] Auto-fix tools (patch `Info.plist`, generate privacy manifest)
+- [x] More preflight checks: launch screen, version sanity, deployment target
+- [x] SwiftPM dependency scanning
+- [x] CLI + CI mode
+- [ ] Entitlements sanity (push, app groups, associated domains)
+- [ ] Privacy nutrition-label cross-check against SDK data collection
 - [ ] Draft reviewer replies from a rejection
 
 ## Contributing

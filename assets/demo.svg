@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="440" viewBox="0 0 760 440" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+  <rect width="760" height="440" rx="12" fill="#0d1117"/>
+  <rect width="760" height="36" rx="12" fill="#161b22"/>
+  <rect y="24" width="760" height="12" fill="#161b22"/>
+  <circle cx="22" cy="18" r="6" fill="#ff5f56"/>
+  <circle cx="42" cy="18" r="6" fill="#ffbd2e"/>
+  <circle cx="62" cy="18" r="6" fill="#27c93f"/>
+  <text x="380" y="23" fill="#8b949e" font-size="12" text-anchor="middle">ios-ship-doctor — preflight</text>
+
+  <g font-size="13">
+    <text x="20" y="66" fill="#58a6ff">$ </text><text x="34" y="66" fill="#c9d1d9">claude "is my app ready to submit?"</text>
+
+    <text x="20" y="98" fill="#8b949e">🩺 Ship Doctor preflight — ~/Desktop/MyApp</text>
+    <text x="20" y="122" fill="#f85149" font-weight="bold">VERDICT: NOT READY — 1 blocking issue will fail review.</text>
+    <text x="20" y="140" fill="#8b949e">(1 error, 1 warning, 8 passed)</text>
+
+    <text x="20" y="172" fill="#f85149">✘ [credential-traps]  Google AdMob TEST application ID in Info.plist</text>
+    <text x="40" y="190" fill="#8b949e">Found "ca-app-pub-3940256099942544" — replace with your real ID.</text>
+
+    <text x="20" y="220" fill="#d29922">▲ [export-compliance] Missing ITSAppUsesNonExemptEncryption</text>
+    <text x="40" y="238" fill="#8b949e">Add &lt;false/&gt; if you only use HTTPS/TLS.</text>
+
+    <text x="20" y="268" fill="#3fb950">✔ [privacy-manifest]     consistent with API usage</text>
+    <text x="20" y="288" fill="#3fb950">✔ [usage-descriptions]   all permission strings present</text>
+    <text x="20" y="308" fill="#3fb950">✔ [dependencies]         SDK privacy manifests OK</text>
+    <text x="20" y="328" fill="#3fb950">✔ [app-icon]             AppIcon.appiconset found</text>
+    <text x="20" y="348" fill="#3fb950">✔ [deprecated-apis]      no banned UIWebView</text>
+    <text x="20" y="368" fill="#3fb950">✔ [version-sanity]       version + build number set</text>
+
+    <text x="20" y="400" fill="#58a6ff">$ </text><text x="34" y="400" fill="#c9d1d9">claude "fix what you can"  </text><text x="250" y="400" fill="#3fb950">→ autofix applied 2 fixes ✓</text>
+    <text x="20" y="420" fill="#c9d1d9" opacity="0.6">▋</text>
+  </g>
+</svg>

@@ -1,0 +1,24 @@
+# Drop this into YOUR iOS app repo at .github/workflows/preflight.yml
+# to block PRs that would fail App Store review.
+name: App Store Preflight
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Install Ship Doctor from GitHub (no npm registry needed).
+      - run: |
+          git clone --depth 1 https://github.com/menansali/ios-ship-doctor.git /tmp/ship-doctor
+          cd /tmp/ship-doctor && npm ci && npm run build
+      # Run the check against this repo. Exits non-zero on blocking errors,
+      # which fails the job and blocks the PR.
+      - run: node /tmp/ship-doctor/dist/index.js preflight "$GITHUB_WORKSPACE"
