@@ -32,11 +32,11 @@ Preflight also checks **export compliance** (`ITSAppUsesNonExemptEncryption`), *
 ```bash
 git clone https://github.com/menansali/ios-ship-doctor.git
 cd ios-ship-doctor
-npm install
+npm install   # downloads dependencies (the MCP SDK + XML parser)
 npm run build
 ```
 
-Once published to npm, users can skip the clone with `npx ios-ship-doctor-mcp`.
+That's the whole setup — no registry account or global install needed.
 
 ## Connect to Claude Code
 
