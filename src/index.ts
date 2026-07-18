@@ -12,6 +12,15 @@ import {
   runPreflight,
   type Finding,
 } from "./scanner.js";
+import {
+  loadAscCreds,
+  buildAscJwt,
+  listApps,
+  getRejections,
+  extractGuidelines,
+  GUIDELINE_MAP,
+  AscConfigError,
+} from "./appstore.js";
 
 const server = new McpServer({
   name: "ios-ship-doctor",
@@ -150,6 +159,95 @@ server.tool(
           type: "text",
           text: `Preview only (write=false). Categories covered: ${categories.join(", ") || "none"}\nWould write to: ${targetPath ?? "(app dir not resolved)"}\n\n${xml}`,
         },
+      ],
+    };
+  }
+);
+
+// ── App Store Connect: rejection recovery ─────────────────────────────────────
+
+/** Mint a fresh short-lived JWT using real wall-clock time. */
+async function ascToken(): Promise<string> {
+  const creds = await loadAscCreds();
+  return buildAscJwt(creds, Math.floor(Date.now() / 1000));
+}
+
+function ascErrorContent(e: unknown) {
+  const msg = e instanceof AscConfigError ? e.message : e instanceof Error ? e.message : String(e);
+  return { content: [{ type: "text" as const, text: `⚠️ ${msg}` }], isError: true };
+}
+
+server.tool(
+  "asc_list_apps",
+  "List the apps on your App Store Connect account (id, name, bundle id). Requires ASC_KEY_ID, ASC_ISSUER_ID, and ASC_PRIVATE_KEY(_PATH) env vars. Use the returned app id with asc_get_rejections.",
+  {},
+  async () => {
+    try {
+      const apps = await listApps(await ascToken());
+      const text = apps.length
+        ? apps.map((a) => `• ${a.name}\n  id: ${a.id}\n  bundle: ${a.bundleId}`).join("\n\n")
+        : "No apps found on this account.";
+      return { content: [{ type: "text", text }] };
+    } catch (e) {
+      return ascErrorContent(e);
+    }
+  }
+);
+
+server.tool(
+  "asc_get_rejections",
+  "Fetch recent App Store review rejections for an app and map any referenced Review Guideline numbers to plain-language summaries and typical fixes. This closes the loop from 'why was I rejected' to 'here's what to change'.",
+  {
+    appId: z.string().describe("App Store Connect app id (from asc_list_apps)."),
+  },
+  async ({ appId }) => {
+    try {
+      const rejections = await getRejections(await ascToken(), appId);
+      if (!rejections.length) {
+        return { content: [{ type: "text", text: "✅ No rejected / metadata-rejected versions found for this app." }] };
+      }
+      const blocks = rejections.map((r) => {
+        const guidelines = extractGuidelines(r.message);
+        const mapped = guidelines
+          .map((g) => {
+            const info = GUIDELINE_MAP[g];
+            return `   📖 Guideline ${g} — ${info.title}\n      ${info.summary}\n      💡 ${info.fix}`;
+          })
+          .join("\n");
+        return [
+          `❌ Version ${r.versionString ?? "?"} — ${r.state ?? "rejected"}${r.createdDate ? ` (${r.createdDate})` : ""}`,
+          `   ${r.message}`,
+          mapped || "   (No known guideline number found in the summary — open Resolution Center for the full reviewer message.)",
+        ].join("\n");
+      });
+      return { content: [{ type: "text", text: blocks.join("\n\n") }] };
+    } catch (e) {
+      return ascErrorContent(e);
+    }
+  }
+);
+
+server.tool(
+  "explain_guideline",
+  "Explain an App Store Review Guideline number (e.g. '5.1.1') in plain language with a typical fix. Works offline — no credentials needed.",
+  {
+    guideline: z.string().describe("Guideline number, e.g. '2.1', '3.1.1', '5.1.1'."),
+  },
+  async ({ guideline }) => {
+    const info = GUIDELINE_MAP[guideline.trim()];
+    if (!info) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `No built-in summary for guideline ${guideline}. Known: ${Object.keys(GUIDELINE_MAP).join(", ")}. See https://developer.apple.com/app-store/review/guidelines/`,
+          },
+        ],
+      };
+    }
+    return {
+      content: [
+        { type: "text", text: `📖 Guideline ${guideline} — ${info.title}\n\n${info.summary}\n\n💡 Typical fix: ${info.fix}` },
       ],
     };
   }

@@ -13,17 +13,31 @@
     "build": "tsc",
     "watch": "tsc --watch",
     "start": "node dist/index.js",
-    "dev": "node --loader ts-node/esm src/index.ts"
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "mcp",
+    "model-context-protocol",
     "ios",
     "app-store",
+    "app-store-connect",
     "privacy-manifest",
-    "claude"
+    "claude",
+    "claude-code"
   ],
-  "author": "",
+  "author": "menansali",
   "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/menansali/ios-ship-doctor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/menansali/ios-ship-doctor/issues"
+  },
+  "homepage": "https://github.com/menansali/ios-ship-doctor#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
     "fast-xml-parser": "^4.5.0",

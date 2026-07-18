@@ -555,6 +555,158 @@ ${entries.join("\n")}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CHECK 5: Export compliance (ITSAppUsesNonExemptEncryption)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function checkExportCompliance(projectPath: string): Promise<Finding[]> {
+  const layout = await resolveLayout(projectPath);
+  if (!layout.infoPlistPath) return [];
+  const raw = await safeRead(layout.infoPlistPath);
+  if (raw.includes("<key>ITSAppUsesNonExemptEncryption</key>")) {
+    return [
+      {
+        severity: "info",
+        check: "export-compliance",
+        title: "Export compliance declared",
+        detail: "ITSAppUsesNonExemptEncryption is set — App Store Connect won't block each submission asking about encryption.",
+      },
+    ];
+  }
+  return [
+    {
+      severity: "warning",
+      check: "export-compliance",
+      title: "Missing ITSAppUsesNonExemptEncryption in Info.plist",
+      detail: "Without this key, App Store Connect prompts you about encryption on every single submission, and TestFlight builds sit in 'Missing Compliance' until answered.",
+      location: relative(layout.iosRoot, layout.infoPlistPath),
+      fix: "Add <key>ITSAppUsesNonExemptEncryption</key><false/> if you only use standard HTTPS/TLS (true if you ship custom/proprietary encryption and have the paperwork).",
+    },
+  ];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHECK 6: App Transport Security (arbitrary loads)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function checkAppTransportSecurity(projectPath: string): Promise<Finding[]> {
+  const layout = await resolveLayout(projectPath);
+  if (!layout.infoPlistPath) return [];
+  const raw = await safeRead(layout.infoPlistPath);
+  // Crude but effective: NSAllowsArbitraryLoads immediately followed by <true/>.
+  const m = raw.match(/<key>NSAllowsArbitraryLoads<\/key>\s*<(true|false)\/>/);
+  if (m && m[1] === "true") {
+    return [
+      {
+        severity: "warning",
+        check: "app-transport-security",
+        title: "NSAllowsArbitraryLoads is enabled (ATS disabled globally)",
+        detail: "Shipping with ATS fully disabled is a common review question and, if unjustified, a rejection under the security guidelines.",
+        location: relative(layout.iosRoot, layout.infoPlistPath),
+        fix: "Prefer per-domain NSExceptionDomains over a global NSAllowsArbitraryLoads=true, or be ready to justify it in the review notes.",
+      },
+    ];
+  }
+  return [
+    {
+      severity: "info",
+      check: "app-transport-security",
+      title: "App Transport Security not globally disabled",
+      detail: "No global NSAllowsArbitraryLoads=true found.",
+    },
+  ];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHECK 7: App icon asset present
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function checkAppIcon(projectPath: string): Promise<Finding[]> {
+  const layout = await resolveLayout(projectPath);
+  if (!layout.appSourceDir) return [];
+  // Look for an AppIcon.appiconset anywhere under the app source dir.
+  const hasIconSet = await containsDir(layout.appSourceDir, "AppIcon.appiconset");
+  if (hasIconSet) {
+    return [
+      {
+        severity: "info",
+        check: "app-icon",
+        title: "App icon asset found",
+        detail: "An AppIcon.appiconset exists in the app's asset catalog.",
+      },
+    ];
+  }
+  return [
+    {
+      severity: "error",
+      check: "app-icon",
+      title: "No AppIcon.appiconset found",
+      detail: "Apps submitted without a complete app icon are rejected. No AppIcon.appiconset was found under the app source directory.",
+      location: relative(layout.iosRoot, layout.appSourceDir),
+      fix: "Add an AppIcon set to Assets.xcassets with all required sizes (a 1024×1024 marketing icon is mandatory).",
+    },
+  ];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHECK 8: Deprecated/banned APIs (UIWebView)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function checkDeprecatedApis(projectPath: string): Promise<Finding[]> {
+  const layout = await resolveLayout(projectPath);
+  const findings: Finding[] = [];
+  const dirs = [layout.appSourceDir].filter(Boolean) as string[];
+  let hitFile: string | null = null;
+  for (const dir of dirs) {
+    const files = await collectSourceFiles(dir);
+    for (const f of files) {
+      const text = await safeRead(f);
+      if (/\bUIWebView\b/.test(text)) {
+        hitFile = relative(layout.iosRoot, f);
+        break;
+      }
+    }
+    if (hitFile) break;
+  }
+  if (hitFile) {
+    findings.push({
+      severity: "error",
+      check: "deprecated-apis",
+      title: "UIWebView reference found (banned by Apple)",
+      detail: "Apple rejects any binary that references the deprecated UIWebView API.",
+      location: hitFile,
+      fix: "Replace UIWebView with WKWebView. Also check that no third-party dependency still links UIWebView.",
+    });
+  } else {
+    findings.push({
+      severity: "info",
+      check: "deprecated-apis",
+      title: "No banned UIWebView references in first-party code",
+      detail: "Note: this scans first-party source only — a dependency could still reference it.",
+    });
+  }
+  return findings;
+}
+
+/** True if a directory named `name` exists anywhere under `root`. */
+async function containsDir(root: string, name: string, depth = 6): Promise<boolean> {
+  if (depth < 0) return false;
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  for (const e of entries) {
+    if (e.isDirectory()) {
+      if (e.name === name) return true;
+      if (IGNORE_DIRS.has(e.name)) continue;
+      if (await containsDir(join(root, e.name), name, depth - 1)) return true;
+    }
+  }
+  return false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Aggregate preflight
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -563,13 +715,26 @@ export async function runPreflight(projectPath: string): Promise<{
   summary: { errors: number; warnings: number; infos: number; verdict: string };
 }> {
   const privacy = await scanPrivacyManifest(projectPath);
-  const [usage, deps, traps] = await Promise.all([
+  const [usage, deps, traps, exportComp, ats, icon, deprecated] = await Promise.all([
     checkUsageDescriptions(projectPath),
     auditDependencies(projectPath),
     checkCredentialTraps(projectPath),
+    checkExportCompliance(projectPath),
+    checkAppTransportSecurity(projectPath),
+    checkAppIcon(projectPath),
+    checkDeprecatedApis(projectPath),
   ]);
 
-  const all = [...privacy.findings, ...usage, ...deps, ...traps];
+  const all = [
+    ...privacy.findings,
+    ...usage,
+    ...deps,
+    ...traps,
+    ...exportComp,
+    ...ats,
+    ...icon,
+    ...deprecated,
+  ];
   const order: Record<Severity, number> = { error: 0, warning: 1, info: 2 };
   all.sort((a, b) => order[a.severity] - order[b.severity]);
 
