@@ -18,8 +18,8 @@ Existing App Store MCPs are thin API wrappers that *submit* your app. Ship Docto
 ## Install
 
 ```bash
-git clone https://github.com/menansali/ios-ship-doctor-mcp.git
-cd ios-ship-doctor-mcp
+git clone https://github.com/menansali/ios-ship-doctor.git
+cd ios-ship-doctor
 npm install
 npm run build
 ```
