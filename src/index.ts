@@ -2,7 +2,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
 import { z } from "zod";
+import { CLIENTS, renderClientConfig, stableNodePath } from "./clients.js";
 import {
   scanPrivacyManifest,
   checkUsageDescriptions,
@@ -403,11 +406,27 @@ if (argv[0] === "preflight") {
   }
   process.exit(summary.errors > 0 ? 1 : 0);
 }
+// `config [client]` prints a ready-to-paste MCP config with absolute paths
+// already resolved — the part that's easy to get wrong by hand.
+if (argv[0] === "config") {
+  const serverPath = fileURLToPath(import.meta.url);
+  const nodePath = stableNodePath(process.execPath, (p) => existsSync(p));
+  const which = argv[1];
+  const chosen = which ? CLIENTS.filter((c) => c.id === which) : CLIENTS;
+  if (chosen.length === 0) {
+    console.error(`Unknown client "${which}". Known: ${CLIENTS.map((c) => c.id).join(", ")}`);
+    process.exit(1);
+  }
+  console.log(chosen.map((c) => renderClientConfig(c, nodePath, serverPath)).join("\n\n" + "─".repeat(70) + "\n\n"));
+  process.exit(0);
+}
 if (argv[0] === "--help" || argv[0] === "-h") {
   console.log(
     `ios-ship-doctor-mcp\n\n` +
-      `  (no args)                 start the MCP server on stdio\n` +
+      `  (no args)                 start the MCP server on stdio (works with any MCP client)\n` +
       `  preflight <path> [--json] run all checks once; exits 1 on blocking errors\n` +
+      `  config [client]           print an MCP config snippet; omit client to print all\n` +
+      `                            clients: ${CLIENTS.map((c) => c.id).join(", ")}\n` +
       `  --help                    show this message\n`
   );
   process.exit(0);

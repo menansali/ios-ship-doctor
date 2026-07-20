@@ -4,7 +4,7 @@
 
 **Catch App Store rejections *before* you hit Submit.**
 
-An [MCP](https://modelcontextprotocol.io) server that lets Claude diagnose why your iOS app will be rejected — privacy manifests, missing permission strings, unlisted SDKs, leftover test credentials — and then fix them. When Apple *does* reject you, it pulls the rejection and maps it to a plain-English fix.
+An [MCP](https://modelcontextprotocol.io) server that lets your AI assistant — Claude Code, Gemini CLI, Codex, Cursor, Copilot, Windsurf, Zed — diagnose why your iOS app will be rejected — privacy manifests, missing permission strings, unlisted SDKs, leftover test credentials — and then fix them. When Apple *does* reject you, it pulls the rejection and maps it to a plain-English fix.
 
 [![CI](https://github.com/menansali/ios-ship-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/menansali/ios-ship-doctor/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-black.svg)](./LICENSE)
@@ -41,11 +41,27 @@ npm install && npm run build
 npm link           # exposes the `ios-ship-doctor-mcp` command
 ```
 
-Add it to Claude Code:
+Then wire it into whichever assistant you use. This is a standard stdio MCP server — it is **not** Claude-specific and works with any MCP client. Let it print the exact config for yours:
 
 ```bash
-claude mcp add ios-ship-doctor -- ios-ship-doctor-mcp
+ios-ship-doctor-mcp config              # every client
+ios-ship-doctor-mcp config gemini       # just one
 ```
+
+Supported out of the box: `claude`, `gemini`, `codex`, `cursor`, `vscode`, `windsurf`, `zed`, `generic`.
+
+| Client | Config file | Root key |
+|---|---|---|
+| Claude Code | `claude mcp add ios-ship-doctor -- ios-ship-doctor-mcp` | `mcpServers` |
+| Gemini CLI | `~/.gemini/settings.json` (or `gemini mcp add …`) | `mcpServers` |
+| OpenAI Codex CLI | `~/.codex/config.toml` | `[mcp_servers.…]` ⚠️ underscore |
+| Cursor | `~/.cursor/mcp.json` or `.cursor/mcp.json` | `mcpServers` |
+| VS Code (Copilot) | `.vscode/mcp.json` | `servers` ⚠️ not `mcpServers` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` | `mcpServers` |
+| Zed | Zed `settings.json` | `context_servers` ⚠️ `command.path` |
+| Anything else | — | `mcpServers` |
+
+The two footguns the generator handles for you: Codex silently ignores `mcp-servers` (it must be `mcp_servers`), and the printed `node` path avoids version-pinned Homebrew/nvm paths that break on the next upgrade.
 
 Then just ask:
 
@@ -143,7 +159,7 @@ The `.p8` never enters the repo — it stays on your machine and is read at runt
 
 ## Manual configuration
 
-If you'd rather not use `npm link`, point Claude at the built file directly:
+If you'd rather not use `npm link`, point your client at the built file directly (this shape works for Claude Code, Gemini CLI, Cursor, Windsurf and most others):
 
 ```json
 {
@@ -158,7 +174,7 @@ If you'd rather not use `npm link`, point Claude at the built file directly:
 
 `projectPath` in any tool can be your repo root (with an `ios/` folder) or the `ios/` directory itself.
 
-## Use it in CI (no Claude required)
+## Use it in CI (no assistant required)
 
 The same binary runs as a one-shot command that exits non-zero on blocking issues:
 

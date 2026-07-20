@@ -1,7 +1,7 @@
 {
   "name": "ios-ship-doctor-mcp",
   "version": "0.1.0",
-  "description": "MCP server that diagnoses why an iOS app will be rejected by App Store review — privacy manifests, required-reason APIs, usage descriptions, dependency manifests — and fixes them.",
+  "description": "MCP server that diagnoses why an iOS app will be rejected by App Store review \u2014 privacy manifests, required-reason APIs, usage descriptions, legal links, dependency manifests \u2014 and fixes them. Works with any MCP client (Claude Code, Gemini CLI, Codex, Cursor, VS Code, Windsurf, Zed).",
   "type": "module",
   "bin": {
     "ios-ship-doctor-mcp": "dist/index.js"
@@ -23,8 +23,13 @@
     "app-store",
     "app-store-connect",
     "privacy-manifest",
-    "claude",
-    "claude-code"
+    "app-review",
+    "claude-code",
+    "gemini-cli",
+    "codex",
+    "cursor",
+    "windsurf",
+    "zed"
   ],
   "author": "menansali",
   "license": "MIT",
