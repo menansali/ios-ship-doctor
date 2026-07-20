@@ -2,6 +2,13 @@ import { readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join, extname, basename, relative } from "node:path";
 import { XMLParser } from "fast-xml-parser";
 import {
+  readXcodeProject,
+  findXcodeProject,
+  GENERATED_PLIST_EQUIVALENTS,
+  type XcodeProject,
+  type SettingValue,
+} from "./xcodeproj.js";
+import {
   REQUIRED_REASON_CATEGORIES,
   USAGE_DESCRIPTION_RULES,
   CREDENTIAL_TRAPS,
@@ -111,61 +118,201 @@ export interface ProjectLayout {
   infoPlistPath: string | null;
   appPrivacyManifestPath: string | null;
   podsDir: string | null;
+  /** Parsed project.pbxproj, when there is one. */
+  xcode: XcodeProject | null;
+  /**
+   * The Info.plist keys the built app will actually have: the plist file's
+   * entries plus the INFOPLIST_KEY_* build settings that Xcode merges in.
+   * Modern projects declare everything here and ship no plist file at all.
+   */
+  effective: Map<string, SettingValue>;
+  /** Key → human-readable origin ("Info.plist" / "build settings"), for findings. */
+  effectiveOrigin: Map<string, string>;
 }
+
+/** Does `dir` exist? */
+async function isDir(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Directories that are never the app target's source. */
+const NON_APP_DIR = /(Tests|UITests|Widget|WidgetExtension|Extension|Clip|Watch.*)$/;
+
+/** Find the directory holding the app's Swift entry point. */
+async function findAppSourceDir(iosRoot: string, xcode: XcodeProject | null): Promise<string | null> {
+  // 1. The dir named after the .xcodeproj — the Xcode template default.
+  if (xcode) {
+    const named = join(iosRoot, basename(xcode.path).replace(/\.xcodeproj$/, ""));
+    if (await isDir(named)) return named;
+  }
+  let entries;
+  try {
+    entries = await readdir(iosRoot, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const candidates = entries.filter(
+    (e) => e.isDirectory() && !IGNORE_DIRS.has(e.name) && !e.name.startsWith(".") && !e.name.endsWith(".xcodeproj") && !e.name.endsWith(".xcworkspace") && !NON_APP_DIR.test(e.name)
+  );
+  // 2. A dir containing an Info.plist (the classic layout).
+  for (const e of candidates) {
+    try {
+      await stat(join(iosRoot, e.name, "Info.plist"));
+      return join(iosRoot, e.name);
+    } catch {
+      /* keep looking */
+    }
+  }
+  // 3. A dir containing an @main entry point (…App.swift / AppDelegate.swift).
+  for (const e of candidates) {
+    const dir = join(iosRoot, e.name);
+    const files = await collectSourceFiles(dir);
+    if (files.some((f) => /App\.swift$|AppDelegate\.swift$/.test(f))) return dir;
+  }
+  return null;
+}
+
+/** Breadth-first search for the directory containing a .xcodeproj. */
+async function findNestedXcodeProject(root: string, maxDepth = 3): Promise<string | null> {
+  let level = [root];
+  for (let depth = 0; depth < maxDepth && level.length; depth++) {
+    const next: string[] = [];
+    for (const dir of level) {
+      let entries;
+      try {
+        entries = await readdir(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const e of entries) {
+        if (!e.isDirectory() || e.name.startsWith(".") || IGNORE_DIRS.has(e.name)) continue;
+        if (e.name.endsWith(".xcodeproj") && e.name !== "Pods.xcodeproj") return dir;
+        if (!e.name.endsWith(".xcworkspace")) next.push(join(dir, e.name));
+      }
+    }
+    level = next;
+  }
+  return null;
+}
+
+/** Parse an Info.plist's top-level entries: strings, booleans and string arrays. */
+export function parsePlistEntries(raw: string): Map<string, SettingValue> {
+  const out = new Map<string, SettingValue>();
+  const re = /<key>([^<]+)<\/key>\s*(?:<string>([\s\S]*?)<\/string>|<(true|false)\/>|<array>([\s\S]*?)<\/array>)/g;
+  for (const m of raw.matchAll(re)) {
+    const key = m[1].trim();
+    if (m[2] !== undefined) out.set(key, m[2].trim());
+    else if (m[3] !== undefined) out.set(key, m[3] === "true" ? "YES" : "NO");
+    else if (m[4] !== undefined) out.set(key, [...m[4].matchAll(/<string>([^<]*)<\/string>/g)].map((x) => x[1].trim()));
+  }
+  // Keys whose value is a <dict> (UILaunchScreen, NSAppTransportSecurity…) aren't
+  // matched above, but the checks only need to know they're declared.
+  for (const m of raw.matchAll(/<key>([^<]+)<\/key>/g)) {
+    const key = m[1].trim();
+    if (!out.has(key)) out.set(key, DECLARED);
+  }
+  return out;
+}
+
+/** Marker value for a key that exists but whose value we don't model (e.g. a dict). */
+export const DECLARED = "<declared>";
 
 export async function resolveLayout(projectPath: string): Promise<ProjectLayout> {
   // Accept either the repo root or the ios/ dir.
   let iosRoot = projectPath;
-  try {
-    const asIos = join(projectPath, "ios");
-    if ((await stat(asIos)).isDirectory()) iosRoot = asIos;
-  } catch {
-    /* projectPath already is the ios dir (or a flat project) */
+  if (await isDir(join(projectPath, "ios"))) iosRoot = join(projectPath, "ios");
+
+  // Monorepos put the app beside a website/server ("repo/MyApp/MyApp.xcodeproj").
+  // Without this, the scan half-resolves and reports missing keys that are
+  // really just one directory further down.
+  if (!(await findXcodeProject(iosRoot))) {
+    const nested = await findNestedXcodeProject(iosRoot);
+    if (nested) iosRoot = nested;
   }
 
+  const xcode = await readXcodeProject(iosRoot);
   const layout: ProjectLayout = {
     iosRoot,
     appSourceDir: null,
     infoPlistPath: null,
     appPrivacyManifestPath: null,
-    podsDir: null,
+    podsDir: (await isDir(join(iosRoot, "Pods"))) ? join(iosRoot, "Pods") : null,
+    xcode,
+    effective: new Map(),
+    effectiveOrigin: new Map(),
   };
 
-  let entries;
-  try {
-    entries = await readdir(iosRoot, { withFileTypes: true });
-  } catch {
-    return layout;
-  }
+  layout.appSourceDir = await findAppSourceDir(iosRoot, xcode);
 
-  for (const e of entries) {
-    if (e.isDirectory() && e.name === "Pods") layout.podsDir = join(iosRoot, "Pods");
-  }
-
-  // Find an Info.plist that is NOT inside Pods (the app target's plist).
-  for (const e of entries) {
-    if (!e.isDirectory()) continue;
-    if (IGNORE_DIRS.has(e.name)) continue;
-    if (e.name.endsWith(".xcodeproj") || e.name.endsWith(".xcworkspace")) continue;
-    const candidate = join(iosRoot, e.name, "Info.plist");
+  // Info.plist: the path the project declares wins, then the conventional spot.
+  const declared = xcode?.settings.get("INFOPLIST_FILE");
+  const candidates = [
+    typeof declared === "string" && declared ? join(iosRoot, declared) : null,
+    layout.appSourceDir ? join(layout.appSourceDir, "Info.plist") : null,
+  ].filter(Boolean) as string[];
+  for (const c of candidates) {
     try {
-      await stat(candidate);
-      layout.appSourceDir = join(iosRoot, e.name);
-      layout.infoPlistPath = candidate;
-      const pm = join(iosRoot, e.name, "PrivacyInfo.xcprivacy");
-      try {
-        await stat(pm);
-        layout.appPrivacyManifestPath = pm;
-      } catch {
-        /* no app manifest yet */
-      }
+      await stat(c);
+      layout.infoPlistPath = c;
       break;
     } catch {
       /* keep looking */
     }
   }
 
+  if (layout.appSourceDir) {
+    const pm = join(layout.appSourceDir, "PrivacyInfo.xcprivacy");
+    try {
+      await stat(pm);
+      layout.appPrivacyManifestPath = pm;
+    } catch {
+      /* no app manifest yet */
+    }
+  }
+
+  // Merge the plist file with the build settings Xcode would generate from.
+  if (layout.infoPlistPath) {
+    for (const [k, v] of parsePlistEntries(await safeRead(layout.infoPlistPath))) {
+      layout.effective.set(k, v);
+      layout.effectiveOrigin.set(k, relative(iosRoot, layout.infoPlistPath));
+    }
+  }
+  if (xcode) {
+    for (const [k, v] of xcode.infoPlistKeys) {
+      layout.effective.set(k, v);
+      layout.effectiveOrigin.set(k, "build settings (INFOPLIST_KEY_…)");
+    }
+    for (const [plistKey, setting] of Object.entries(GENERATED_PLIST_EQUIVALENTS)) {
+      const v = xcode.settings.get(setting);
+      if (typeof v === "string" && v && !layout.effective.has(plistKey)) {
+        layout.effective.set(plistKey, v);
+        layout.effectiveOrigin.set(plistKey, `build settings (${setting})`);
+      }
+    }
+  }
+
   return layout;
+}
+
+/** Where a given effective key came from — for the `location` field on findings. */
+function origin(layout: ProjectLayout, key: string): string | undefined {
+  return layout.effectiveOrigin.get(key) ?? (layout.infoPlistPath ? relative(layout.iosRoot, layout.infoPlistPath) : layout.xcode ? "build settings" : undefined);
+}
+
+/** True when the project declares its Info.plist keys in build settings. */
+function usesGeneratedPlist(layout: ProjectLayout): boolean {
+  return layout.xcode?.settings.get("GENERATE_INFOPLIST_FILE") === "YES";
+}
+
+/** Human-readable place to add a missing Info.plist key. */
+function plistTarget(layout: ProjectLayout): string {
+  return usesGeneratedPlist(layout)
+    ? "the target's build settings (Xcode → target → Info tab, or INFOPLIST_KEY_… in project.pbxproj)"
+    : "Info.plist";
 }
 
 /**
@@ -218,11 +365,20 @@ function locate(corpus: SourceCorpus, layout: ProjectLayout, needle: string | Re
   return hit ? relative(layout.iosRoot, hit.path) : undefined;
 }
 
-/** Word-ish match of a signature within source text. */
-function usesSignature(haystack: string, sig: string): boolean {
-  // Simple contains match is good enough and avoids false negatives from
-  // member-access chains; guarded by requiring the raw substring.
-  return haystack.includes(sig);
+/**
+ * Match a signature on identifier boundaries.
+ *
+ * A plain `includes` is catastrophically loose here: the required-reason API
+ * list contains the C function `stat`, which is a substring of `@State` — so
+ * every SwiftUI file in existence looked like it called file-timestamp APIs.
+ * Boundaries are only applied at ends that are word characters, so signatures
+ * like `setCategory(.playback` or `@react-native-google-signin` still work.
+ */
+export function usesSignature(haystack: string, sig: string): boolean {
+  const escaped = sig.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pre = /^[A-Za-z0-9_]/.test(sig) ? "(?<![A-Za-z0-9_])" : "";
+  const post = /[A-Za-z0-9_]$/.test(sig) ? "(?![A-Za-z0-9_])" : "";
+  return new RegExp(`${pre}${escaped}${post}`).test(haystack);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -250,7 +406,7 @@ export async function scanPrivacyManifest(projectPath: string): Promise<PrivacyS
   // Detect which categories the first-party code actually uses.
   const usedMap = new Map<string, Set<string>>(); // category -> files
   for (const file of sourceFiles) {
-    const text = await safeRead(file);
+    const text = stripComments(await safeRead(file));
     if (!text) continue;
     for (const cat of REQUIRED_REASON_CATEGORIES) {
       if (cat.signatures.some((s) => usesSignature(text, s))) {
@@ -390,19 +546,18 @@ export async function scanPrivacyManifest(projectPath: string): Promise<PrivacyS
 export async function checkUsageDescriptions(projectPath: string): Promise<Finding[]> {
   const layout = await resolveLayout(projectPath);
   const findings: Finding[] = [];
-  if (!layout.infoPlistPath) {
+  if (!layout.infoPlistPath && !layout.xcode) {
     return [
       {
         severity: "warning",
         check: "usage-descriptions",
-        title: "Could not locate the app's Info.plist",
-        detail: `Looked under ${layout.iosRoot}. Point the tool at the ios/ directory or repo root.`,
+        title: "Could not locate an Info.plist or an Xcode project",
+        detail: `Looked under ${layout.iosRoot}. Point the tool at the ios/ directory or the repo root.`,
       },
     ];
   }
 
-  const infoRaw = await safeRead(layout.infoPlistPath);
-  const map = parsePlistStringValues(infoRaw);
+  const map = layout.effective;
 
   // Gather all first-party + Podfile signatures to know which permissions are used.
   const sourceFiles = layout.appSourceDir ? await collectSourceFiles(layout.appSourceDir) : [];
@@ -421,9 +576,11 @@ export async function checkUsageDescriptions(projectPath: string): Promise<Findi
         severity: "error",
         check: "usage-descriptions",
         title: `Missing ${rule.key} (${rule.label})`,
-        detail: `The project appears to use ${rule.label}, but Info.plist has no ${rule.key}. The app will crash on first use of the API and be rejected.`,
-        location: relative(layout.iosRoot, layout.infoPlistPath),
-        fix: `Add <key>${rule.key}</key><string>…clear user-facing purpose…</string> to Info.plist.`,
+        detail: `The project appears to use ${rule.label}, but no ${rule.key} is declared. The app will crash on first use of the API and be rejected.`,
+        location: origin(layout, rule.key),
+        fix: usesGeneratedPlist(layout)
+          ? `Set INFOPLIST_KEY_${rule.key} = "…clear user-facing purpose…" in the target's build settings.`
+          : `Add <key>${rule.key}</key><string>…clear user-facing purpose…</string> to Info.plist.`,
       });
     } else if (typeof value === "string" && value.trim().length < 10) {
       findings.push({
@@ -431,7 +588,7 @@ export async function checkUsageDescriptions(projectPath: string): Promise<Findi
         check: "usage-descriptions",
         title: `${rule.key} purpose string is too short / vague`,
         detail: `"${value}" is likely to be rejected for not clearly explaining why the app needs ${rule.label}.`,
-        location: relative(layout.iosRoot, layout.infoPlistPath),
+        location: origin(layout, rule.key),
         fix: "Write a specific, user-facing sentence describing the feature that needs this permission.",
       });
     }
@@ -605,18 +762,21 @@ async function containsFile(dir: string, name: string, depth = 6): Promise<boole
 export async function checkCredentialTraps(projectPath: string): Promise<Finding[]> {
   const layout = await resolveLayout(projectPath);
   const findings: Finding[] = [];
-  if (!layout.infoPlistPath) return findings;
-  const raw = await safeRead(layout.infoPlistPath);
+  // Values can live in the plist file or in INFOPLIST_KEY_* build settings.
+  const raw = layout.infoPlistPath ? await safeRead(layout.infoPlistPath) : "";
+  const settings = [...layout.effective.values()].flat().join("\n");
+  const haystack = `${raw}\n${settings}`;
+  if (!haystack.trim()) return findings;
 
   for (const trap of CREDENTIAL_TRAPS) {
     for (const bad of trap.badValues) {
-      if (raw.includes(bad)) {
+      if (haystack.includes(bad)) {
         findings.push({
           severity: "error",
           check: "credential-traps",
           title: trap.label,
-          detail: `Found placeholder/test value "${bad}"${trap.plistKey ? ` for ${trap.plistKey}` : ""} in Info.plist.`,
-          location: relative(layout.iosRoot, layout.infoPlistPath),
+          detail: `Found placeholder/test value "${bad}"${trap.plistKey ? ` for ${trap.plistKey}` : ""}.`,
+          location: trap.plistKey ? origin(layout, trap.plistKey) : origin(layout, ""),
           fix: trap.advice,
         });
       }
@@ -686,9 +846,8 @@ ${entries.join("\n")}
 
 export async function checkExportCompliance(projectPath: string): Promise<Finding[]> {
   const layout = await resolveLayout(projectPath);
-  if (!layout.infoPlistPath) return [];
-  const raw = await safeRead(layout.infoPlistPath);
-  if (raw.includes("<key>ITSAppUsesNonExemptEncryption</key>")) {
+  if (!layout.infoPlistPath && !layout.xcode) return [];
+  if (layout.effective.has("ITSAppUsesNonExemptEncryption")) {
     return [
       {
         severity: "info",
@@ -702,10 +861,12 @@ export async function checkExportCompliance(projectPath: string): Promise<Findin
     {
       severity: "warning",
       check: "export-compliance",
-      title: "Missing ITSAppUsesNonExemptEncryption in Info.plist",
+      title: "Missing ITSAppUsesNonExemptEncryption",
       detail: "Without this key, App Store Connect prompts you about encryption on every single submission, and TestFlight builds sit in 'Missing Compliance' until answered.",
-      location: relative(layout.iosRoot, layout.infoPlistPath),
-      fix: "Add <key>ITSAppUsesNonExemptEncryption</key><false/> if you only use standard HTTPS/TLS (true if you ship custom/proprietary encryption and have the paperwork).",
+      location: origin(layout, "ITSAppUsesNonExemptEncryption"),
+      fix: usesGeneratedPlist(layout)
+        ? "Set INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO in the target's build settings (true only if you ship custom encryption and have the paperwork)."
+        : "Add <key>ITSAppUsesNonExemptEncryption</key><false/> if you only use standard HTTPS/TLS (true if you ship custom/proprietary encryption and have the paperwork).",
     },
   ];
 }
@@ -838,17 +999,21 @@ async function containsDir(root: string, name: string, depth = 6): Promise<boole
 
 export async function checkLaunchScreen(projectPath: string): Promise<Finding[]> {
   const layout = await resolveLayout(projectPath);
-  if (!layout.infoPlistPath) return [];
-  const raw = await safeRead(layout.infoPlistPath);
-  const hasStoryboard = raw.includes("<key>UILaunchStoryboardName</key>");
-  const hasLaunchScreen = raw.includes("<key>UILaunchScreen</key>");
-  if (hasStoryboard || hasLaunchScreen) {
+  if (!layout.infoPlistPath && !layout.xcode) return [];
+  // Xcode generates a launch screen when UILaunchScreen_Generation is on, so
+  // that build setting satisfies the requirement just as the plist keys do.
+  const configured =
+    layout.effective.has("UILaunchStoryboardName") ||
+    layout.effective.has("UILaunchScreen") ||
+    layout.effective.get("UILaunchScreen_Generation") === "YES" ||
+    layout.xcode?.settings.get("INFOPLIST_KEY_UILaunchScreen_Generation") === "YES";
+  if (configured) {
     return [
       {
         severity: "info",
         check: "launch-screen",
         title: "Launch screen configured",
-        detail: "Info.plist declares a launch storyboard / launch screen.",
+        detail: "The project declares a launch storyboard / launch screen.",
       },
     ];
   }
@@ -858,8 +1023,10 @@ export async function checkLaunchScreen(projectPath: string): Promise<Finding[]>
       check: "launch-screen",
       title: "No launch screen configured",
       detail: "Apps without a launch storyboard render at a non-native resolution and are commonly rejected under the design guidelines.",
-      location: relative(layout.iosRoot, layout.infoPlistPath),
-      fix: "Add UILaunchStoryboardName (e.g. LaunchScreen) or a UILaunchScreen dict to Info.plist.",
+      location: origin(layout, "UILaunchScreen"),
+      fix: usesGeneratedPlist(layout)
+        ? "Set INFOPLIST_KEY_UILaunchScreen_Generation = YES in the target's build settings, or add a launch storyboard."
+        : "Add UILaunchStoryboardName (e.g. LaunchScreen) or a UILaunchScreen dict to Info.plist.",
     },
   ];
 }
@@ -870,27 +1037,27 @@ export async function checkLaunchScreen(projectPath: string): Promise<Finding[]>
 
 export async function checkVersionSanity(projectPath: string): Promise<Finding[]> {
   const layout = await resolveLayout(projectPath);
-  if (!layout.infoPlistPath) return [];
-  const raw = await safeRead(layout.infoPlistPath);
+  if (!layout.infoPlistPath && !layout.xcode) return [];
   const findings: Finding[] = [];
-  if (!raw.includes("<key>CFBundleShortVersionString</key>")) {
+  // Either the plist key or the build setting Xcode substitutes into it counts.
+  if (!layout.effective.has("CFBundleShortVersionString")) {
     findings.push({
       severity: "error",
       check: "version-sanity",
-      title: "Missing CFBundleShortVersionString (marketing version)",
+      title: "No marketing version (CFBundleShortVersionString / MARKETING_VERSION)",
       detail: "Every submitted build needs a marketing version string.",
-      location: relative(layout.iosRoot, layout.infoPlistPath),
-      fix: "Add <key>CFBundleShortVersionString</key><string>1.0.0</string> (or $(MARKETING_VERSION)).",
+      location: origin(layout, "CFBundleShortVersionString"),
+      fix: "Set MARKETING_VERSION in build settings, or add <key>CFBundleShortVersionString</key><string>1.0.0</string> to Info.plist.",
     });
   }
-  if (!raw.includes("<key>CFBundleVersion</key>")) {
+  if (!layout.effective.has("CFBundleVersion")) {
     findings.push({
       severity: "error",
       check: "version-sanity",
-      title: "Missing CFBundleVersion (build number)",
+      title: "No build number (CFBundleVersion / CURRENT_PROJECT_VERSION)",
       detail: "Every submitted build needs a build number.",
-      location: relative(layout.iosRoot, layout.infoPlistPath),
-      fix: "Add <key>CFBundleVersion</key><string>1</string> (or $(CURRENT_PROJECT_VERSION)).",
+      location: origin(layout, "CFBundleVersion"),
+      fix: "Set CURRENT_PROJECT_VERSION in build settings, or add <key>CFBundleVersion</key><string>1</string> to Info.plist.",
     });
   }
   if (findings.length === 0) {
@@ -910,9 +1077,13 @@ export async function checkVersionSanity(projectPath: string): Promise<Finding[]
 
 export async function checkDeploymentTarget(projectPath: string): Promise<Finding[]> {
   const layout = await resolveLayout(projectPath);
+  // The project's own setting is authoritative; the Podfile is the fallback.
+  const fromProject = layout.xcode?.settings.get("IPHONEOS_DEPLOYMENT_TARGET");
   const podfile = await safeRead(join(layout.iosRoot, "Podfile"));
-  const m = podfile.match(/platform\s+:ios,\s*['"](\d+)(?:\.\d+)?['"]/);
-  if (!m) return []; // no Podfile / not declared here — skip quietly
+  const m =
+    (typeof fromProject === "string" && fromProject.match(/^(\d+)/)) ||
+    podfile.match(/platform\s+:ios,\s*['"](\d+)(?:\.\d+)?['"]/);
+  if (!m) return []; // not declared anywhere we can see — skip quietly
   const major = parseInt(m[1], 10);
   if (major < 13) {
     return [
@@ -921,7 +1092,7 @@ export async function checkDeploymentTarget(projectPath: string): Promise<Findin
         check: "deployment-target",
         title: `Very old iOS deployment target (iOS ${m[1]})`,
         detail: "Supporting very old iOS versions increases the surface for review issues and misses required-API behavior changes.",
-        location: "Podfile",
+        location: typeof fromProject === "string" ? "build settings (IPHONEOS_DEPLOYMENT_TARGET)" : "Podfile",
         fix: "Consider raising platform :ios to a currently-supported minimum (13+).",
       },
     ];
@@ -955,7 +1126,7 @@ export async function checkLegalLinks(projectPath: string): Promise<Finding[]> {
   const blob = (await buildCorpus(layout)).text;
   if (!blob.trim()) return [];
 
-  const sellsSubscriptions = PURCHASE_SIGNATURES.some((s) => blob.includes(s));
+  const sellsSubscriptions = PURCHASE_SIGNATURES.some((s) => usesSignature(blob, s));
   const hasPrivacyLink = PRIVACY_LINK_PATTERNS.some((re) => re.test(blob));
   const hasTermsLink = TERMS_LINK_PATTERNS.some((re) => re.test(blob));
 
@@ -1028,9 +1199,9 @@ export async function checkAccountRequirements(projectPath: string): Promise<Fin
   if (!blob.trim()) return [];
 
   const findings: Finding[] = [];
-  const hasAccounts = ACCOUNT_SIGNATURES.some((s) => blob.includes(s));
-  const socialHit = SOCIAL_LOGIN_SIGNATURES.find((s) => blob.includes(s));
-  const hasApple = APPLE_LOGIN_SIGNATURES.some((s) => blob.includes(s));
+  const hasAccounts = ACCOUNT_SIGNATURES.some((s) => usesSignature(blob, s));
+  const socialHit = SOCIAL_LOGIN_SIGNATURES.find((s) => usesSignature(blob, s));
+  const hasApple = APPLE_LOGIN_SIGNATURES.some((s) => usesSignature(blob, s));
 
   if (!hasAccounts && !socialHit) return findings;
 
@@ -1040,7 +1211,7 @@ export async function checkAccountRequirements(projectPath: string): Promise<Fin
     title: "Login detected — App Review needs working demo credentials",
     detail:
       "Guideline 2.1: if a reviewer can't get past your sign-in screen, the app is rejected without the rest of it ever being seen. This is the single most common avoidable rejection for account-based apps.",
-    location: locate(corpus, layout, ACCOUNT_SIGNATURES.find((s) => blob.includes(s)) ?? ""),
+    location: locate(corpus, layout, ACCOUNT_SIGNATURES.find((s) => usesSignature(blob, s)) ?? ""),
     fix: "In App Store Connect → the version → App Review Information, tick 'Sign-in required' and provide a demo username/password that stays valid for the whole review. Use asc_check_submission to verify the field is actually filled.",
   });
 
@@ -1087,10 +1258,10 @@ export async function checkExternalPayments(projectPath: string): Promise<Findin
   const blob = corpus.text;
   if (!blob.trim()) return [];
 
-  const paymentHit = EXTERNAL_PAYMENT_SIGNATURES.find((s) => blob.includes(s));
+  const paymentHit = EXTERNAL_PAYMENT_SIGNATURES.find((s) => usesSignature(blob, s));
   if (!paymentHit) return [];
 
-  const hasStoreKit = PURCHASE_SIGNATURES.some((s) => blob.includes(s));
+  const hasStoreKit = PURCHASE_SIGNATURES.some((s) => usesSignature(blob, s));
   if (hasStoreKit) {
     return [
       {
@@ -1120,27 +1291,20 @@ export async function checkExternalPayments(projectPath: string): Promise<Findin
 // CHECK 15: Background modes declared but never used (2.5.4)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Pull the UIBackgroundModes string array out of a raw Info.plist. */
-export function parseBackgroundModes(plistRaw: string): string[] {
-  const m = plistRaw.match(/<key>UIBackgroundModes<\/key>\s*<array>([\s\S]*?)<\/array>/);
-  if (!m) return [];
-  return [...m[1].matchAll(/<string>([^<]*)<\/string>/g)].map((x) => x[1].trim()).filter(Boolean);
-}
-
 export async function checkBackgroundModes(projectPath: string): Promise<Finding[]> {
   const layout = await resolveLayout(projectPath);
-  if (!layout.infoPlistPath) return [];
-  const modes = parseBackgroundModes(await safeRead(layout.infoPlistPath));
+  const declared = layout.effective.get("UIBackgroundModes");
+  const modes = Array.isArray(declared) ? declared : typeof declared === "string" && declared ? [declared] : [];
   if (modes.length === 0) return [];
 
   const blob = (await buildCorpus(layout)).text;
   const findings: Finding[] = [];
-  const plistLoc = relative(layout.iosRoot, layout.infoPlistPath);
+  const plistLoc = origin(layout, "UIBackgroundModes");
 
   for (const mode of modes) {
     const rule = BACKGROUND_MODE_RULES.find((r) => r.mode === mode);
     if (!rule) continue; // unknown/newer mode — don't guess
-    if (rule.signatures.some((s) => blob.includes(s))) continue;
+    if (rule.signatures.some((s) => usesSignature(blob, s))) continue;
     findings.push({
       severity: "warning",
       check: "background-modes",
@@ -1191,14 +1355,15 @@ export async function checkPlaceholderContent(projectPath: string): Promise<Find
   }
 
   // The app's display name is the most visible template leftover of all.
-  const displayName = parsePlistStringValues(infoRaw).get("CFBundleDisplayName");
+  const nameValue = layout.effective.get("CFBundleDisplayName");
+  const displayName = typeof nameValue === "string" ? nameValue : undefined;
   if (displayName && TEMPLATE_APP_NAMES.has(displayName.trim())) {
     findings.push({
       severity: "warning",
       check: "placeholder-content",
       title: `CFBundleDisplayName is still the template name "${displayName}"`,
       detail: "The name under the icon on the Home Screen is a project template default.",
-      location: layout.infoPlistPath ? relative(layout.iosRoot, layout.infoPlistPath) : undefined,
+      location: origin(layout, "CFBundleDisplayName"),
       fix: "Set CFBundleDisplayName to the real app name (it should match the App Store name closely — mismatches also draw 2.3 metadata rejections).",
     });
   }
@@ -1281,7 +1446,7 @@ export async function applyAutoFixes(
       corpus += await safeRead(join(layout.iosRoot, "Podfile"));
       corpus += await safeRead(join(layout.iosRoot, "..", "package.json"));
       for (const rule of USAGE_DESCRIPTION_RULES) {
-        const used = rule.signatures.some((s) => corpus.includes(s));
+        const used = rule.signatures.some((s) => usesSignature(corpus, s));
         if (used && !raw.includes(`<key>${rule.key}</key>`)) {
           const stub = `This app uses ${rule.label.toLowerCase()} to provide its core features.`;
           const next = insertPlistKey(raw, rule.key, `<string>${stub}</string>`);
@@ -1332,9 +1497,17 @@ export async function applyAutoFixes(
 // Aggregate preflight
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Shown with every verdict. Ship Doctor checks mechanical, statically-detectable
+ * rules; the most common rejection causes (crashes, incomplete functionality,
+ * design, metadata accuracy, content) need a human or a running app.
+ */
+export const CAVEAT =
+  "Scope: static checks of project files only. Passing does not predict approval — crashes and incomplete features (2.1), design (4.0), metadata accuracy (2.3) and content are judged by a human reviewer with the app running.";
+
 export async function runPreflight(projectPath: string): Promise<{
   findings: Finding[];
-  summary: { errors: number; warnings: number; infos: number; verdict: string };
+  summary: { errors: number; warnings: number; infos: number; verdict: string; caveat: string };
 }> {
   const privacy = await scanPrivacyManifest(projectPath);
   const [
@@ -1396,12 +1569,15 @@ export async function runPreflight(projectPath: string): Promise<{
   const warnings = all.filter((f) => f.severity === "warning").length;
   const infos = all.filter((f) => f.severity === "info").length;
 
+  // Deliberately hedged. These are static checks: they cannot see crashes,
+  // design quality, metadata accuracy or content — the things most rejections
+  // are actually about. Promising "READY" would be a promise this can't keep.
   const verdict =
     errors > 0
-      ? `NOT READY — ${errors} blocking issue${errors === 1 ? "" : "s"} will fail App Store review.`
+      ? `NOT READY — ${errors} issue${errors === 1 ? "" : "s"} that commonly cause rejection.`
       : warnings > 0
-        ? `LIKELY OK — no blockers, but ${warnings} warning${warnings === 1 ? "" : "s"} worth fixing.`
-        : "READY — no blocking review issues detected by Ship Doctor.";
+        ? `NO BLOCKERS DETECTED — ${warnings} warning${warnings === 1 ? "" : "s"} worth reviewing.`
+        : "NO BLOCKERS DETECTED — every automated check passed.";
 
-  return { findings: all, summary: { errors, warnings, infos, verdict } };
+  return { findings: all, summary: { errors, warnings, infos, verdict, caveat: CAVEAT } };
 }

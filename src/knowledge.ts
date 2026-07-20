@@ -32,11 +32,16 @@ export const REQUIRED_REASON_CATEGORIES: RequiredReasonCategory[] = [
   {
     category: "NSPrivacyAccessedAPICategoryFileTimestamp",
     label: "File timestamp APIs",
+    // NOTE: bare "creationDate"/"modificationDate" are deliberately NOT listed.
+    // They match PHAsset.creationDate (photo metadata, not a file timestamp) and
+    // any user-defined property of that name, which made every photo app look
+    // like it used this category. The FileManager form is caught by
+    // attributesOfItem/setAttributes, which must appear for the key to be read.
     signatures: [
-      "creationDate",
-      "modificationDate",
       "contentModificationDateKey",
       "creationDateKey",
+      "attributesOfItem",
+      "setAttributes",
       "getattrlist",
       "getattrlistbulk",
       "fgetattrlist",
@@ -118,7 +123,19 @@ export const USAGE_DESCRIPTION_RULES: UsageDescriptionRule[] = [
   {
     key: "NSPhotoLibraryUsageDescription",
     label: "Photo Library (read)",
-    signatures: ["PHPhotoLibrary", "UIImagePickerController", "PHAsset", "react-native-image-picker", "expo-image-picker", "photo library"],
+    // UIImagePickerController is deliberately absent: it's equally the camera
+    // UI, and camera-only use needs NSCameraUsageDescription instead. Match the
+    // source types and Photos-framework entry points that really imply library
+    // access. (PHPickerViewController is out-of-process and needs no permission.)
+    signatures: [
+      "PHPhotoLibrary",
+      "PHAsset",
+      "PHImageManager",
+      ".photoLibrary",
+      ".savedPhotosAlbum",
+      "react-native-image-picker",
+      "expo-image-picker",
+    ],
   },
   {
     key: "NSPhotoLibraryAddUsageDescription",

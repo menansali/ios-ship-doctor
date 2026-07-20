@@ -69,7 +69,7 @@ server.tool(
     const { findings, summary } = await runPreflight(projectPath);
     const header = `🩺 Ship Doctor preflight — ${projectPath}\n\nVERDICT: ${summary.verdict}\n(${summary.errors} errors, ${summary.warnings} warnings, ${summary.infos} passed)`;
     return {
-      content: [{ type: "text", text: `${header}\n\n${renderFindings(findings)}` }],
+      content: [{ type: "text", text: `${header}\n\n${renderFindings(findings)}\n\nℹ️ ${summary.caveat}` }],
     };
   }
 );
@@ -399,6 +399,7 @@ if (argv[0] === "preflight") {
   } else {
     console.log(`🩺 Ship Doctor — ${projectPath}\n${summary.verdict}\n(${summary.errors} errors, ${summary.warnings} warnings, ${summary.infos} passed)\n`);
     console.log(renderFindings(findings));
+    console.log(`\nℹ️ ${summary.caveat}`);
   }
   process.exit(summary.errors > 0 ? 1 : 0);
 }

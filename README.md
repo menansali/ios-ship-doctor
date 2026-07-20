@@ -56,7 +56,7 @@ Then just ask:
 ```
 🩺 Ship Doctor preflight — /Users/you/Desktop/MyApp
 
-VERDICT: NOT READY — 1 blocking issue will fail App Store review.
+VERDICT: NOT READY — 1 issue that commonly causes rejection.
 (1 error, 1 warning, 6 passed)
 
 ❌ [credential-traps] Google AdMob TEST application ID in Info.plist
@@ -94,6 +94,20 @@ VERDICT: NOT READY — 1 blocking issue will fail App Store review.
 | `autofix` | Applies the safe fixes automatically; reports the rest as manual follow-up |
 
 `preflight` also checks **export compliance**, **App Transport Security**, **app-icon presence**, **banned APIs** (`UIWebView`), **launch screen**, **version/build sanity**, and **deployment target**. Dependency scanning covers both **CocoaPods and Swift Package Manager**.
+
+Project layouts understood: classic `Info.plist` projects, **modern projects with `GENERATE_INFOPLIST_FILE` and no plist file** (keys read from `INFOPLIST_KEY_*` build settings), `ios/` subdirectories, and monorepos where the `.xcodeproj` sits a level or two down.
+
+### What this does *not* check
+
+Ship Doctor reads project files. It cannot see the things most rejections are actually about:
+
+- **Crashes and incomplete features (2.1)** — the most common rejection; needs the app running
+- **Design quality (4.0)** and **spam/duplicate (4.3)** — human judgement
+- **Metadata accuracy (2.3)** — whether screenshots match the real app
+- **Privacy label accuracy (5.1.1)** — whether declared data collection matches SDK behaviour
+- Anything a **dependency** does; source scanning is first-party only
+
+A clean run means "no automated check fired", not "this will be approved."
 
 ### Rejection recovery — needs an App Store Connect API key
 

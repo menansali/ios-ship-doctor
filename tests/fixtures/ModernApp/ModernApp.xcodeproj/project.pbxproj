@@ -1,0 +1,60 @@
+// !$*UTF8*$!
+// Trimmed to the parts Ship Doctor reads. This is the modern Xcode layout:
+// GENERATE_INFOPLIST_FILE = YES and NO Info.plist file on disk, so every key
+// lives in build settings. A scanner that only reads Info.plist sees nothing.
+{
+	archiveVersion = 1;
+	objectVersion = 77;
+	objects = {
+
+/* Begin XCBuildConfiguration section */
+		AA00000000000000000000A1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CURRENT_PROJECT_VERSION = 7;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSCameraUsageDescription = "ModernApp uses the camera so you can photograph a receipt and attach it to an expense.";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UIBackgroundModes = (
+					audio,
+					location,
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 2.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.example.ModernApp;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		AA00000000000000000000A2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CURRENT_PROJECT_VERSION = 7;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSCameraUsageDescription = "ModernApp uses the camera so you can photograph a receipt and attach it to an expense.";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UIBackgroundModes = (
+					audio,
+					location,
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 2.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.example.ModernApp;
+			};
+			name = Release;
+		};
+		AA00000000000000000000B1 /* Release (widget — must not be mistaken for the app) */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = MyApp;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.example.ModernApp.ModernAppWidget;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+	};
+	rootObject = AA00000000000000000000FF;
+}

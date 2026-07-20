@@ -12,6 +12,8 @@ import {
   applyAutoFixes,
   buildPrivacyManifestXml,
   stripComments,
+  usesSignature,
+  parsePlistEntries,
 } from "../dist/scanner.js";
 import { buildAscJwt, extractGuidelines } from "../dist/appstore.js";
 
@@ -19,6 +21,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const BAD = join(HERE, "fixtures", "BadApp");
 const GOOD = join(HERE, "fixtures", "GoodApp");
 const WEBPAY = join(HERE, "fixtures", "WebPayApp");
+const MODERN = join(HERE, "fixtures", "ModernApp");
 
 const errorChecks = (findings) => new Set(findings.filter((f) => f.severity === "error").map((f) => f.check));
 
@@ -35,7 +38,7 @@ test("preflight flags every planted issue in BadApp", async () => {
 test("preflight passes a clean app (GoodApp)", async () => {
   const { findings, summary } = await runPreflight(GOOD);
   assert.equal(summary.errors, 0, `expected 0 errors, got: ${findings.filter((f) => f.severity === "error").map((f) => f.title).join(" | ")}`);
-  assert.match(summary.verdict, /READY/);
+  assert.match(summary.verdict, /NO BLOCKERS DETECTED/);
 });
 
 test("subscription app without legal links is flagged for both privacy policy and EULA", async () => {
@@ -93,6 +96,67 @@ test("template app name and Stripe test key are caught", async () => {
   const titles = findings.filter((f) => f.check === "placeholder-content").map((f) => f.title);
   assert.ok(titles.some((t) => /template name "MyApp"/.test(t)), `got: ${titles.join(" | ")}`);
   assert.ok(titles.some((t) => /Stripe TEST API key/.test(t)));
+});
+
+test("modern project with a generated Info.plist is fully analysed", async () => {
+  // Regression: ModernApp has NO Info.plist file — every key is a build
+  // setting. This layout used to scan as an empty project and report clean.
+  const { findings } = await runPreflight(MODERN);
+  const checks = new Set(findings.map((f) => f.check));
+  assert.ok(checks.has("usage-descriptions"), "must have looked at permissions");
+
+  // Keys declared only in build settings must count as declared.
+  const errs = findings.filter((f) => f.severity === "error").map((f) => f.title).join(" | ");
+  assert.doesNotMatch(errs, /NSCameraUsageDescription/, "camera string is in INFOPLIST_KEY_*");
+  assert.doesNotMatch(errs, /marketing version|build number/i, "MARKETING_VERSION/CURRENT_PROJECT_VERSION are set");
+  const all = findings.map((f) => f.title).join(" | ");
+  assert.doesNotMatch(all, /No launch screen/, "UILaunchScreen_Generation = YES");
+  assert.doesNotMatch(all, /ITSAppUsesNonExemptEncryption/, "declared in build settings");
+
+  // UIBackgroundModes declared as a build-setting array is still cross-checked.
+  const modes = findings.filter((f) => f.check === "background-modes");
+  assert.equal(modes.length, 2, "audio + location, neither implemented");
+});
+
+test("@State is not mistaken for the stat() file-timestamp API", async () => {
+  // "stat" is a required-reason C function and a substring of "@State", so a
+  // naive contains-match flagged every SwiftUI file in existence.
+  const { findings } = await runPreflight(MODERN);
+  const fileTimestamp = findings.filter((f) => /File timestamp/.test(f.title));
+  assert.equal(fileTimestamp.length, 0, `false positive: ${fileTimestamp.map((f) => f.title).join()}`);
+  assert.equal(usesSignature("@State private var x = 1", "stat"), false);
+  assert.equal(usesSignature("if stat(path, &buf) == 0 {", "stat"), true);
+  // partial-word matches must not fire either
+  assert.equal(usesSignature("let status = 1", "stat"), false);
+  assert.equal(usesSignature("statistics()", "stat"), false);
+});
+
+test("the app target's settings win over an extension's", async () => {
+  // The widget config in the fixture sets CFBundleDisplayName = MyApp (a
+  // template name). Reading it as the app's would be a false positive.
+  const { findings } = await runPreflight(MODERN);
+  assert.ok(
+    !findings.some((f) => /template name/.test(f.title)),
+    "widget settings must not be merged into the app target"
+  );
+});
+
+test("plist keys holding a dict count as declared", () => {
+  const raw = `<plist><dict>
+    <key>UILaunchScreen</key><dict><key>UIColorName</key><string>Bg</string></dict>
+    <key>UIBackgroundModes</key><array><string>audio</string></array>
+    <key>ITSAppUsesNonExemptEncryption</key><false/>
+  </dict></plist>`;
+  const entries = parsePlistEntries(raw);
+  assert.ok(entries.has("UILaunchScreen"), "dict-valued key must register");
+  assert.deepEqual(entries.get("UIBackgroundModes"), ["audio"]);
+  assert.equal(entries.get("ITSAppUsesNonExemptEncryption"), "NO");
+});
+
+test("verdicts do not promise App Store approval", async () => {
+  const { summary } = await runPreflight(MODERN);
+  assert.doesNotMatch(summary.verdict, /will fail|^READY|guaranteed/);
+  assert.match(summary.caveat, /does not predict approval/);
 });
 
 test("stripComments removes comments but never breaks URLs", () => {
