@@ -146,6 +146,202 @@ export async function getRejections(token: string, appId: string): Promise<Rejec
   return out;
 }
 
+/** The version App Store Connect would submit next (newest editable one). */
+async function latestVersion(
+  token: string,
+  appId: string
+): Promise<{ id: string; versionString: string; state: string } | null> {
+  const versions = await ascFetch(
+    `/apps/${appId}/appStoreVersions?limit=5&fields[appStoreVersions]=versionString,appStoreState`,
+    token
+  );
+  const v = (versions.data ?? [])[0];
+  if (!v) return null;
+  return {
+    id: v.id,
+    versionString: v.attributes?.versionString ?? "?",
+    state: v.attributes?.appStoreState ?? "?",
+  };
+}
+
+export interface ReviewDetail {
+  demoAccountRequired: boolean | null;
+  demoAccountName: string | null;
+  demoAccountPassword: string | null;
+  notes: string | null;
+  contactEmail: string | null;
+}
+
+/**
+ * Read the App Review Information for the next version — the demo credentials
+ * reviewers use to get past a login wall (Guideline 2.1).
+ */
+export async function getReviewDetail(
+  token: string,
+  versionId: string
+): Promise<ReviewDetail | null> {
+  try {
+    const detail = await ascFetch(`/appStoreVersions/${versionId}/appStoreReviewDetail`, token);
+    const a = detail?.data?.attributes ?? {};
+    return {
+      demoAccountRequired: a.demoAccountRequired ?? null,
+      demoAccountName: a.demoAccountName ?? null,
+      demoAccountPassword: a.demoAccountPassword ?? null,
+      notes: a.notes ?? null,
+      contactEmail: a.contactEmail ?? null,
+    };
+  } catch {
+    return null; // not created yet — which is itself the finding
+  }
+}
+
+export interface ScreenshotCoverage {
+  locale: string;
+  /** displayType → number of screenshots uploaded. */
+  sets: Record<string, number>;
+}
+
+/** Display types Apple requires for every submission (as of iOS 18 / 2024+). */
+export const REQUIRED_SCREENSHOT_TYPES: { type: string; label: string }[] = [
+  { type: "APP_IPHONE_67", label: "iPhone 6.7\" / 6.9\" (required)" },
+];
+
+/** Count uploaded screenshots per localization and display type. */
+export async function getScreenshotCoverage(
+  token: string,
+  versionId: string
+): Promise<ScreenshotCoverage[]> {
+  const locs = await ascFetch(
+    `/appStoreVersions/${versionId}/appStoreVersionLocalizations?limit=50&fields[appStoreVersionLocalizations]=locale`,
+    token
+  );
+  const out: ScreenshotCoverage[] = [];
+  for (const loc of locs.data ?? []) {
+    const sets: Record<string, number> = {};
+    try {
+      const setsData = await ascFetch(
+        `/appStoreVersionLocalizations/${loc.id}/appScreenshotSets?limit=50&include=appScreenshots`,
+        token
+      );
+      for (const s of setsData.data ?? []) {
+        const type = s.attributes?.screenshotDisplayType ?? "UNKNOWN";
+        sets[type] = (s.relationships?.appScreenshots?.data ?? []).length;
+      }
+    } catch {
+      /* localization without sets yet */
+    }
+    out.push({ locale: loc.attributes?.locale ?? "?", sets });
+  }
+  return out;
+}
+
+export interface SubmissionCheck {
+  version: { id: string; versionString: string; state: string } | null;
+  review: ReviewDetail | null;
+  screenshots: ScreenshotCoverage[];
+  findings: { severity: "error" | "warning" | "info"; title: string; detail: string; fix?: string }[];
+}
+
+/**
+ * The metadata half of preflight: things only App Store Connect knows —
+ * whether demo credentials are actually filled in, and whether the required
+ * screenshot sets have anything in them.
+ */
+export async function checkSubmission(token: string, appId: string): Promise<SubmissionCheck> {
+  const version = await latestVersion(token, appId);
+  const result: SubmissionCheck = { version, review: null, screenshots: [], findings: [] };
+  if (!version) {
+    result.findings.push({
+      severity: "warning",
+      title: "No App Store version found for this app",
+      detail: "Create the version in App Store Connect before submitting.",
+    });
+    return result;
+  }
+
+  const [review, screenshots] = await Promise.all([
+    getReviewDetail(token, version.id),
+    getScreenshotCoverage(token, version.id).catch(() => [] as ScreenshotCoverage[]),
+  ]);
+  result.review = review;
+  result.screenshots = screenshots;
+
+  // ── Demo account (Guideline 2.1) ──
+  if (!review) {
+    result.findings.push({
+      severity: "warning",
+      title: "App Review Information has not been filled in",
+      detail: `Version ${version.versionString} has no review detail record — no contact info and no demo account.`,
+      fix: "App Store Connect → the version → App Review Information.",
+    });
+  } else if (review.demoAccountRequired && !(review.demoAccountName && review.demoAccountPassword)) {
+    result.findings.push({
+      severity: "error",
+      title: "Sign-in is marked required but demo credentials are empty",
+      detail:
+        "Reviewers cannot get past the login screen. This is a guaranteed 2.1 rejection and usually costs a full review cycle.",
+      fix: "Fill in the demo username and password (and keep that account working for the whole review).",
+    });
+  } else if (!review.demoAccountRequired) {
+    result.findings.push({
+      severity: "info",
+      title: "Sign-in marked not required for review",
+      detail:
+        "If the app actually has a login wall, tick 'Sign-in required' and supply credentials — otherwise the reviewer will be stuck.",
+    });
+  } else {
+    result.findings.push({
+      severity: "info",
+      title: "Demo account provided for App Review",
+      detail: `Username "${review.demoAccountName}" is set. Verify it still works right before you submit.`,
+    });
+  }
+
+  if (!review?.notes) {
+    result.findings.push({
+      severity: "info",
+      title: "App Review notes are empty",
+      detail:
+        "Notes are where you explain non-obvious flows, where account deletion lives, and why any unusual permission or background mode is needed. Filling them prevents avoidable rejections.",
+    });
+  }
+
+  // ── Screenshots ──
+  if (screenshots.length === 0) {
+    result.findings.push({
+      severity: "warning",
+      title: "Could not read screenshot sets",
+      detail: "No localizations returned, or the API key lacks access. Check screenshots manually.",
+    });
+  } else {
+    for (const loc of screenshots) {
+      for (const req of REQUIRED_SCREENSHOT_TYPES) {
+        const count = loc.sets[req.type] ?? 0;
+        if (count === 0) {
+          result.findings.push({
+            severity: "error",
+            title: `No ${req.label} screenshots for ${loc.locale}`,
+            detail:
+              "App Store Connect blocks submission without the required iPhone screenshot set — and a wrong/empty set is caught at the last step, after you've already waited for the build to process.",
+            fix: "Upload at least one 6.7\"/6.9\" iPhone screenshot for this localization.",
+          });
+        }
+      }
+    }
+    if (!result.findings.some((f) => f.severity === "error" && /screenshots/.test(f.title))) {
+      result.findings.push({
+        severity: "info",
+        title: `Screenshot sets present for ${screenshots.length} localization(s)`,
+        detail: screenshots
+          .map((l) => `${l.locale}: ${Object.entries(l.sets).map(([t, n]) => `${t}×${n}`).join(", ") || "none"}`)
+          .join(" | "),
+      });
+    }
+  }
+
+  return result;
+}
+
 /**
  * Common App Store Review Guideline numbers → plain-language summary + typical fix.
  * Lets Claude map a rejection's guideline reference to something actionable.
@@ -177,6 +373,11 @@ export const GUIDELINE_MAP: Record<string, { title: string; summary: string; fix
       "Auto-renewable subscription app is missing required disclosures: subscription title/length/price, or functional Privacy Policy and Terms of Use (EULA) links — both at the point of purchase AND in the App Store description/metadata.",
     fix: "Put subscription title, duration and price on the paywall, add tappable Privacy Policy + Terms of Use links there, and repeat both URLs as text in the App Store description plus the App Information fields (Privacy Policy URL, License Agreement).",
   },
+  "2.5.4": {
+    title: "Background modes",
+    summary: "App declares a background mode (location, audio, VoIP…) it doesn't actually implement, or uses one to keep itself alive.",
+    fix: "Remove unused entries from UIBackgroundModes; only declare modes tied to a real, reviewable feature.",
+  },
   "4.0": {
     title: "Design",
     summary: "UI is copied, low-quality, or not designed for iOS.",
@@ -186,6 +387,11 @@ export const GUIDELINE_MAP: Record<string, { title: string; summary: string; fix
     title: "Spam / Duplicate",
     summary: "App is a duplicate of something already on the store or a template with minimal differentiation.",
     fix: "Add genuinely unique functionality/content; consolidate duplicate submissions.",
+  },
+  "4.8": {
+    title: "Sign in with Apple",
+    summary: "App offers a third-party or social login (Google, Facebook, …) without offering Sign in with Apple as an equivalent option.",
+    fix: "Add Sign in with Apple alongside the other providers. Apps with only their own email/password accounts are exempt.",
   },
   "5.1.1": {
     title: "Data Collection and Storage (Privacy)",

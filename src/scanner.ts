@@ -11,6 +11,12 @@ import {
   PRIVACY_LINK_PATTERNS,
   TERMS_LINK_PATTERNS,
   APPLE_STANDARD_EULA,
+  SOCIAL_LOGIN_SIGNATURES,
+  APPLE_LOGIN_SIGNATURES,
+  EXTERNAL_PAYMENT_SIGNATURES,
+  BACKGROUND_MODE_RULES,
+  PLACEHOLDER_PATTERNS,
+  TEMPLATE_APP_NAMES,
 } from "./knowledge.js";
 
 /** Severity ordering for report sorting. */
@@ -160,6 +166,56 @@ export async function resolveLayout(projectPath: string): Promise<ProjectLayout>
   }
 
   return layout;
+}
+
+/**
+ * Every first-party source file plus the dependency manifests, read once.
+ * Most checks only need the concatenated text; `files` is there for the ones
+ * that must report *where* a hit was.
+ */
+export interface SourceCorpus {
+  text: string;
+  files: { path: string; text: string }[];
+}
+
+/**
+ * Drop comments before signature matching. Without this, a comment that merely
+ * *mentions* an SDK ("we deliberately don't use StoreKit here") reads as usage,
+ * and a "// TODO: add a Terms of Use link" reads as the link already existing.
+ * The `[^:]` guard keeps the `//` in https:// URLs — those are real evidence.
+ */
+export function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:"'\w])\/\/.*$/gm, "$1");
+}
+
+export async function buildCorpus(layout: ProjectLayout): Promise<SourceCorpus> {
+  const files: SourceCorpus["files"] = [];
+  const seen = new Set<string>();
+  const dirs = [layout.appSourceDir, layout.iosRoot].filter(Boolean) as string[];
+  for (const dir of dirs) {
+    for (const f of await collectSourceFiles(dir)) {
+      if (seen.has(f)) continue;
+      seen.add(f);
+      files.push({ path: f, text: stripComments(await safeRead(f)) });
+    }
+  }
+  // Dependency manifests: SDK names live here, not in source.
+  for (const manifest of ["Podfile", "Package.swift", join("..", "package.json"), "package.json"]) {
+    const path = join(layout.iosRoot, manifest);
+    if (seen.has(path)) continue;
+    seen.add(path);
+    const text = await safeRead(path);
+    if (text) files.push({ path, text });
+  }
+  return { text: files.map((f) => f.text).join("\n"), files };
+}
+
+/** First file in the corpus matching `needle`, as an iosRoot-relative path. */
+function locate(corpus: SourceCorpus, layout: ProjectLayout, needle: string | RegExp): string | undefined {
+  const hit = corpus.files.find((f) =>
+    typeof needle === "string" ? f.text.includes(needle) : needle.test(f.text)
+  );
+  return hit ? relative(layout.iosRoot, hit.path) : undefined;
 }
 
 /** Word-ish match of a signature within source text. */
@@ -896,25 +952,10 @@ export async function checkLegalLinks(projectPath: string): Promise<Finding[]> {
   const layout = await resolveLayout(projectPath);
   const findings: Finding[] = [];
 
-  // Gather first-party source plus the dependency manifests (SDK names live there).
-  const dirs = [layout.appSourceDir, layout.iosRoot].filter(Boolean) as string[];
-  const texts: string[] = [];
-  const seen = new Set<string>();
-  for (const dir of dirs) {
-    for (const f of await collectSourceFiles(dir)) {
-      if (seen.has(f)) continue;
-      seen.add(f);
-      texts.push(await safeRead(f));
-    }
-  }
-  for (const manifest of ["Podfile", "Package.swift", "../package.json", "package.json"]) {
-    texts.push(await safeRead(join(layout.iosRoot, manifest)));
-  }
-  const blob = texts.join("\n");
+  const blob = (await buildCorpus(layout)).text;
   if (!blob.trim()) return [];
 
   const sellsSubscriptions = PURCHASE_SIGNATURES.some((s) => blob.includes(s));
-  const hasAccounts = ACCOUNT_SIGNATURES.some((s) => blob.includes(s));
   const hasPrivacyLink = PRIVACY_LINK_PATTERNS.some((re) => re.test(blob));
   const hasTermsLink = TERMS_LINK_PATTERNS.some((re) => re.test(blob));
 
@@ -967,6 +1008,42 @@ export async function checkLegalLinks(projectPath: string): Promise<Finding[]> {
     }
   }
 
+  return findings;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHECK 13: Account requirements — demo credentials, deletion, 4.8 Apple sign-in
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Everything that follows from "this app has accounts":
+ *  - 2.1  a login wall with no demo account = reviewer never sees the app
+ *  - 5.1.1(v) account creation obliges in-app account deletion
+ *  - 4.8  offering a third-party login obliges offering Sign in with Apple
+ */
+export async function checkAccountRequirements(projectPath: string): Promise<Finding[]> {
+  const layout = await resolveLayout(projectPath);
+  const corpus = await buildCorpus(layout);
+  const blob = corpus.text;
+  if (!blob.trim()) return [];
+
+  const findings: Finding[] = [];
+  const hasAccounts = ACCOUNT_SIGNATURES.some((s) => blob.includes(s));
+  const socialHit = SOCIAL_LOGIN_SIGNATURES.find((s) => blob.includes(s));
+  const hasApple = APPLE_LOGIN_SIGNATURES.some((s) => blob.includes(s));
+
+  if (!hasAccounts && !socialHit) return findings;
+
+  findings.push({
+    severity: "warning",
+    check: "demo-account",
+    title: "Login detected — App Review needs working demo credentials",
+    detail:
+      "Guideline 2.1: if a reviewer can't get past your sign-in screen, the app is rejected without the rest of it ever being seen. This is the single most common avoidable rejection for account-based apps.",
+    location: locate(corpus, layout, ACCOUNT_SIGNATURES.find((s) => blob.includes(s)) ?? ""),
+    fix: "In App Store Connect → the version → App Review Information, tick 'Sign-in required' and provide a demo username/password that stays valid for the whole review. Use asc_check_submission to verify the field is actually filled.",
+  });
+
   if (hasAccounts) {
     findings.push({
       severity: "warning",
@@ -978,6 +1055,162 @@ export async function checkLegalLinks(projectPath: string): Promise<Finding[]> {
     });
   }
 
+  if (socialHit && !hasApple) {
+    findings.push({
+      severity: "error",
+      check: "sign-in-with-apple",
+      title: `Third-party login (${socialHit}) without Sign in with Apple`,
+      detail:
+        "Guideline 4.8: an app that offers a third-party or social login service must also offer Sign in with Apple as an equivalent option. Apps whose only login is their own email/password account system are exempt.",
+      location: locate(corpus, layout, socialHit),
+      fix: "Add Sign in with Apple (ASAuthorizationAppleIDProvider / SignInWithAppleButton) alongside the existing provider, and enable the Sign in with Apple capability on the app target.",
+    });
+  } else if (socialHit && hasApple) {
+    findings.push({
+      severity: "info",
+      check: "sign-in-with-apple",
+      title: "Sign in with Apple offered alongside third-party login",
+      detail: "Guideline 4.8 satisfied.",
+    });
+  }
+
+  return findings;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHECK 14: External payment rails for digital content (3.1.1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function checkExternalPayments(projectPath: string): Promise<Finding[]> {
+  const layout = await resolveLayout(projectPath);
+  const corpus = await buildCorpus(layout);
+  const blob = corpus.text;
+  if (!blob.trim()) return [];
+
+  const paymentHit = EXTERNAL_PAYMENT_SIGNATURES.find((s) => blob.includes(s));
+  if (!paymentHit) return [];
+
+  const hasStoreKit = PURCHASE_SIGNATURES.some((s) => blob.includes(s));
+  if (hasStoreKit) {
+    return [
+      {
+        severity: "info",
+        check: "external-payments",
+        title: `Non-Apple payments (${paymentHit}) present alongside StoreKit`,
+        detail:
+          "Both rails are in the binary. That's fine as long as the non-Apple one is only ever used for physical goods or services consumed outside the app — digital content must go through StoreKit (3.1.1).",
+      },
+    ];
+  }
+
+  return [
+    {
+      severity: "warning",
+      check: "external-payments",
+      title: `Non-Apple payment SDK (${paymentHit}) and no StoreKit in the project`,
+      detail:
+        "Guideline 3.1.1: unlocking digital content or features must use Apple's in-app purchase. Taking payment for digital goods through an external processor — or linking out to a web checkout for them — is a hard reject. Physical goods, and services consumed outside the app, are explicitly allowed.",
+      location: locate(corpus, layout, paymentHit),
+      fix: "If you sell digital content, move that purchase to StoreKit. If you sell physical goods/real-world services, this is fine — make sure the App Review notes say so, since reviewers will ask.",
+    },
+  ];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHECK 15: Background modes declared but never used (2.5.4)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Pull the UIBackgroundModes string array out of a raw Info.plist. */
+export function parseBackgroundModes(plistRaw: string): string[] {
+  const m = plistRaw.match(/<key>UIBackgroundModes<\/key>\s*<array>([\s\S]*?)<\/array>/);
+  if (!m) return [];
+  return [...m[1].matchAll(/<string>([^<]*)<\/string>/g)].map((x) => x[1].trim()).filter(Boolean);
+}
+
+export async function checkBackgroundModes(projectPath: string): Promise<Finding[]> {
+  const layout = await resolveLayout(projectPath);
+  if (!layout.infoPlistPath) return [];
+  const modes = parseBackgroundModes(await safeRead(layout.infoPlistPath));
+  if (modes.length === 0) return [];
+
+  const blob = (await buildCorpus(layout)).text;
+  const findings: Finding[] = [];
+  const plistLoc = relative(layout.iosRoot, layout.infoPlistPath);
+
+  for (const mode of modes) {
+    const rule = BACKGROUND_MODE_RULES.find((r) => r.mode === mode);
+    if (!rule) continue; // unknown/newer mode — don't guess
+    if (rule.signatures.some((s) => blob.includes(s))) continue;
+    findings.push({
+      severity: "warning",
+      check: "background-modes",
+      title: `UIBackgroundModes declares "${mode}" but no matching API use was found`,
+      detail: `Guideline 2.5.4: an app may only declare a background mode it actually implements. Nothing in first-party code looks like ${rule.label}, so a reviewer checking this will ask why the mode is there.`,
+      location: plistLoc,
+      fix: `Remove "${mode}" from UIBackgroundModes, or — if a dependency provides the behavior — explain it in the App Review notes.`,
+    });
+  }
+
+  if (findings.length === 0) {
+    findings.push({
+      severity: "info",
+      check: "background-modes",
+      title: `Background modes justified (${modes.join(", ")})`,
+      detail: "Every declared mode has corresponding API usage in first-party code.",
+    });
+  }
+  return findings;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHECK 16: Placeholder / template content (2.1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function checkPlaceholderContent(projectPath: string): Promise<Finding[]> {
+  const layout = await resolveLayout(projectPath);
+  const corpus = await buildCorpus(layout);
+  const findings: Finding[] = [];
+
+  const infoRaw = layout.infoPlistPath ? await safeRead(layout.infoPlistPath) : "";
+  // Scan source + the app's Info.plist (placeholders hide in both).
+  const haystack: { path: string; text: string }[] = [...corpus.files];
+  if (infoRaw && layout.infoPlistPath) haystack.push({ path: layout.infoPlistPath, text: infoRaw });
+
+  for (const p of PLACEHOLDER_PATTERNS) {
+    const hit = haystack.find((f) => p.pattern.test(f.text));
+    if (!hit) continue;
+    const match = hit.text.match(p.pattern);
+    findings.push({
+      severity: p.severity,
+      check: "placeholder-content",
+      title: p.label,
+      detail: `Found ${match ? `"${match[0].slice(0, 60)}"` : "a placeholder"} in shipped content. Guideline 2.1 rejects apps containing placeholder text, dead links, or unconfigured keys.`,
+      location: relative(layout.iosRoot, hit.path),
+      fix: p.advice,
+    });
+  }
+
+  // The app's display name is the most visible template leftover of all.
+  const displayName = parsePlistStringValues(infoRaw).get("CFBundleDisplayName");
+  if (displayName && TEMPLATE_APP_NAMES.has(displayName.trim())) {
+    findings.push({
+      severity: "warning",
+      check: "placeholder-content",
+      title: `CFBundleDisplayName is still the template name "${displayName}"`,
+      detail: "The name under the icon on the Home Screen is a project template default.",
+      location: layout.infoPlistPath ? relative(layout.iosRoot, layout.infoPlistPath) : undefined,
+      fix: "Set CFBundleDisplayName to the real app name (it should match the App Store name closely — mismatches also draw 2.3 metadata rejections).",
+    });
+  }
+
+  if (findings.length === 0) {
+    findings.push({
+      severity: "info",
+      check: "placeholder-content",
+      title: "No placeholder or template content detected",
+      detail: "Checked source and Info.plist for filler text, test keys, example.com links, and template app names.",
+    });
+  }
   return findings;
 }
 
@@ -1104,8 +1337,23 @@ export async function runPreflight(projectPath: string): Promise<{
   summary: { errors: number; warnings: number; infos: number; verdict: string };
 }> {
   const privacy = await scanPrivacyManifest(projectPath);
-  const [usage, deps, traps, exportComp, ats, icon, deprecated, launch, version, deployment, legal] =
-    await Promise.all([
+  const [
+    usage,
+    deps,
+    traps,
+    exportComp,
+    ats,
+    icon,
+    deprecated,
+    launch,
+    version,
+    deployment,
+    legal,
+    accounts,
+    payments,
+    backgroundModes,
+    placeholders,
+  ] = await Promise.all([
       checkUsageDescriptions(projectPath),
       auditDependencies(projectPath),
       checkCredentialTraps(projectPath),
@@ -1117,6 +1365,10 @@ export async function runPreflight(projectPath: string): Promise<{
       checkVersionSanity(projectPath),
       checkDeploymentTarget(projectPath),
       checkLegalLinks(projectPath),
+      checkAccountRequirements(projectPath),
+      checkExternalPayments(projectPath),
+      checkBackgroundModes(projectPath),
+      checkPlaceholderContent(projectPath),
     ]);
 
   const all = [
@@ -1132,6 +1384,10 @@ export async function runPreflight(projectPath: string): Promise<{
     ...version,
     ...deployment,
     ...legal,
+    ...accounts,
+    ...payments,
+    ...backgroundModes,
+    ...placeholders,
   ];
   const order: Record<Severity, number> = { error: 0, warning: 1, info: 2 };
   all.sort((a, b) => order[a.severity] - order[b.severity]);

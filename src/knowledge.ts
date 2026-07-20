@@ -254,6 +254,178 @@ export const TERMS_LINK_PATTERNS: RegExp[] = [
 export const APPLE_STANDARD_EULA =
   "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/";
 
+/**
+ * Third-party / social login services. Guideline 4.8: if an app uses one of
+ * these as a login option, it must ALSO offer Sign in with Apple. (Apps with
+ * only their own email/password account system are exempt.)
+ */
+export const SOCIAL_LOGIN_SIGNATURES: string[] = [
+  "GIDSignIn",
+  "GoogleSignIn",
+  "GoogleAuthProvider",
+  "@react-native-google-signin",
+  "FBSDKLoginKit",
+  "FacebookAuthProvider",
+  "react-native-fbsdk",
+  "FBSDKCoreKit",
+  "TWTRTwitter",
+  "signInWithOAuth",
+  "expo-auth-session",
+];
+
+/** Sign in with Apple implementations that satisfy Guideline 4.8. */
+export const APPLE_LOGIN_SIGNATURES: string[] = [
+  "ASAuthorizationAppleIDProvider",
+  "SignInWithAppleButton",
+  "ASAuthorizationController",
+  "expo-apple-authentication",
+  "react-native-apple-authentication",
+  "AppleAuthProvider",
+  'OAuthProvider("apple',
+  "AuthenticationServices",
+];
+
+/**
+ * Non-Apple payment rails. Charging for *digital* content through these instead
+ * of StoreKit is Guideline 3.1.1 — the classic hard reject. Physical goods and
+ * services consumed outside the app are fine, so this is always a judgement call.
+ */
+export const EXTERNAL_PAYMENT_SIGNATURES: string[] = [
+  "StripePaymentSheet",
+  "@stripe/stripe-react-native",
+  "STPPaymentHandler",
+  "checkout.stripe.com",
+  "buy.stripe.com",
+  "PayPalCheckout",
+  "paypal.com/checkout",
+  "BraintreeCore",
+  "Paddle",
+  "lemonsqueezy.com",
+  "RazorpayCheckout",
+];
+
+/**
+ * UIBackgroundModes entries and the APIs that justify them. Declaring a mode the
+ * app never exercises is Guideline 2.5.4 — reviewers check this specifically.
+ */
+export interface BackgroundModeRule {
+  mode: string;
+  label: string;
+  signatures: string[];
+}
+
+export const BACKGROUND_MODE_RULES: BackgroundModeRule[] = [
+  {
+    mode: "location",
+    label: "Background location updates",
+    signatures: ["allowsBackgroundLocationUpdates", "startMonitoringSignificantLocationChanges", "startUpdatingLocation", "requestAlwaysAuthorization"],
+  },
+  {
+    mode: "audio",
+    label: "Background audio / AirPlay",
+    signatures: ["AVAudioSession", "AVAudioPlayer", "AVPlayer", "setCategory(.playback", "react-native-track-player", "expo-av"],
+  },
+  {
+    mode: "voip",
+    label: "Voice over IP",
+    signatures: ["PKPushRegistry", "CXProvider", "CallKit", "react-native-callkeep"],
+  },
+  {
+    mode: "fetch",
+    label: "Background fetch",
+    signatures: ["BGAppRefreshTask", "performFetchWithCompletionHandler", "setMinimumBackgroundFetchInterval", "BackgroundFetch"],
+  },
+  {
+    mode: "processing",
+    label: "Background processing",
+    signatures: ["BGProcessingTask", "BGTaskScheduler"],
+  },
+  {
+    mode: "remote-notification",
+    label: "Silent push notifications",
+    signatures: ["didReceiveRemoteNotification", "content-available", "contentAvailable"],
+  },
+  {
+    mode: "bluetooth-central",
+    label: "Bluetooth central",
+    signatures: ["CBCentralManager"],
+  },
+  {
+    mode: "bluetooth-peripheral",
+    label: "Bluetooth peripheral",
+    signatures: ["CBPeripheralManager"],
+  },
+  {
+    mode: "external-accessory",
+    label: "External accessory",
+    signatures: ["EAAccessory", "ExternalAccessory"],
+  },
+];
+
+/**
+ * Placeholder / template content that should never reach review (Guideline 2.1:
+ * "App Completeness" — placeholder text, broken links, non-functional keys).
+ */
+export interface PlaceholderPattern {
+  id: string;
+  label: string;
+  pattern: RegExp;
+  severity: "error" | "warning";
+  advice: string;
+}
+
+export const PLACEHOLDER_PATTERNS: PlaceholderPattern[] = [
+  {
+    id: "lorem-ipsum",
+    label: "Lorem ipsum filler text",
+    pattern: /lorem\s+ipsum/i,
+    severity: "error",
+    advice: "Replace filler copy with real content — reviewers reject placeholder text under 2.1.",
+  },
+  {
+    id: "stripe-test-key",
+    label: "Stripe TEST API key",
+    pattern: /\b[sp]k_test_[A-Za-z0-9]{8,}/,
+    severity: "error",
+    advice: "This is a Stripe test-mode key. Swap in the live key (and keep it out of the bundle if possible) before shipping.",
+  },
+  {
+    id: "unfilled-token",
+    label: "Unfilled configuration placeholder",
+    pattern: /\b(YOUR_[A-Z0-9_]{2,}|INSERT_[A-Z0-9_]{2,}|REPLACE_ME|CHANGEME|XXXXXXXX)\b/,
+    severity: "error",
+    advice: "A template placeholder was left in the shipped configuration. Fill in the real value.",
+  },
+  {
+    id: "example-domain",
+    label: "example.com placeholder URL",
+    pattern: /https?:\/\/(www\.)?example\.(com|org|net)/i,
+    severity: "warning",
+    advice: "example.com links are dead links. Reviewers click every link in the app; broken ones are rejected under 2.1.",
+  },
+  {
+    id: "placeholder-email",
+    label: "Placeholder support email",
+    pattern: /\b(test|foo|bar|user|admin)@(example|test)\.(com|org)\b/i,
+    severity: "warning",
+    advice: "Point support/contact addresses at a mailbox you actually monitor.",
+  },
+];
+
+/** Template app names that mean the bundle display name was never set. */
+export const TEMPLATE_APP_NAMES = new Set([
+  "MyApp",
+  "myapp",
+  "Example",
+  "ExampleApp",
+  "AwesomeProject",
+  "HelloWorld",
+  "Untitled",
+  "TestApp",
+  "ReactNativeApp",
+  "Expo App",
+]);
+
 /** Reason-code metadata for FileTimestamp, used in generated-manifest comments. */
 export const REASON_HINTS: Record<string, string> = {
   "C617.1": "Access timestamps of files inside the app container / group container / CloudKit.",

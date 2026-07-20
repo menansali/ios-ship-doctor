@@ -85,7 +85,11 @@ VERDICT: NOT READY — 1 blocking issue will fail App Store review.
 | `check_usage_descriptions` | Camera / location / photos / mic / tracking used with no `NS…UsageDescription` |
 | `audit_dependencies` | Apple-listed SDKs shipping without a `PrivacyInfo.xcprivacy` |
 | `check_credential_traps` | Placeholder / public test credentials in `Info.plist` |
-| `check_legal_links` | Missing Privacy Policy / Terms of Use (EULA) links on a paywall + in the App Store description (3.1.2), and the in-app account-deletion requirement (5.1.1(v)) |
+| `check_legal_links` | Missing Privacy Policy / Terms of Use (EULA) links on a paywall + in the App Store description (3.1.2) |
+| `check_account_requirements` | No demo account for App Review (2.1), missing in-app account deletion (5.1.1(v)), social login without Sign in with Apple (4.8) |
+| `check_external_payments` | Stripe/PayPal/Paddle for digital content with no StoreKit (3.1.1) |
+| `check_background_modes` | `UIBackgroundModes` entries the app never actually implements (2.5.4) |
+| `check_placeholder_content` | Lorem ipsum, Stripe test keys, `YOUR_API_KEY`, example.com dead links, template app names (2.1) |
 | `generate_privacy_manifest` | Writes a valid `PrivacyInfo.xcprivacy` covering every detected API |
 | `autofix` | Applies the safe fixes automatically; reports the rest as manual follow-up |
 
@@ -97,6 +101,7 @@ VERDICT: NOT READY — 1 blocking issue will fail App Store review.
 |------|--------------|
 | `asc_list_apps` | Lists your apps (id, name, bundle id) |
 | `asc_get_rejections` | Pulls recent rejections, maps Review Guideline numbers → summaries + fixes |
+| `asc_check_submission` | The metadata half of preflight: demo credentials actually filled in, review notes, required screenshot sets |
 | `explain_guideline` | Explains any Review Guideline number (offline, no key needed) |
 
 <details>

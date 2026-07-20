@@ -9,6 +9,10 @@ import {
   auditDependencies,
   checkCredentialTraps,
   checkLegalLinks,
+  checkAccountRequirements,
+  checkExternalPayments,
+  checkBackgroundModes,
+  checkPlaceholderContent,
   buildPrivacyManifestXml,
   applyAutoFixes,
   runPreflight,
@@ -19,6 +23,7 @@ import {
   buildAscJwt,
   listApps,
   getRejections,
+  checkSubmission,
   extractGuidelines,
   GUIDELINE_MAP,
   AscConfigError,
@@ -140,6 +145,62 @@ server.tool(
         },
       ],
     };
+  }
+);
+
+// ── Tool: account requirements ────────────────────────────────────────────────
+server.tool(
+  "check_account_requirements",
+  "For apps with accounts: flags a missing demo account for App Review (2.1), the in-app account-deletion requirement (5.1.1(v)), and third-party/social login shipped without Sign in with Apple (4.8).",
+  projectPathArg,
+  async ({ projectPath }) => {
+    const findings = await checkAccountRequirements(projectPath);
+    return {
+      content: [
+        { type: "text", text: findings.length ? renderFindings(findings) : "No account/login signals found — nothing to check." },
+      ],
+    };
+  }
+);
+
+// ── Tool: external payments ───────────────────────────────────────────────────
+server.tool(
+  "check_external_payments",
+  "Detect non-Apple payment rails (Stripe, PayPal, Braintree, Paddle…) in a project that has no StoreKit. Charging for digital content outside Apple's IAP is Guideline 3.1.1 — a hard reject. Physical goods are exempt, so this reports for judgement rather than asserting a violation.",
+  projectPathArg,
+  async ({ projectPath }) => {
+    const findings = await checkExternalPayments(projectPath);
+    return {
+      content: [
+        { type: "text", text: findings.length ? renderFindings(findings) : "✅ No third-party payment SDKs detected." },
+      ],
+    };
+  }
+);
+
+// ── Tool: background modes ────────────────────────────────────────────────────
+server.tool(
+  "check_background_modes",
+  "Cross-check every UIBackgroundModes entry in Info.plist against actual API usage in source. Declaring a background mode the app doesn't implement is Guideline 2.5.4, and reviewers check it specifically.",
+  projectPathArg,
+  async ({ projectPath }) => {
+    const findings = await checkBackgroundModes(projectPath);
+    return {
+      content: [
+        { type: "text", text: findings.length ? renderFindings(findings) : "No UIBackgroundModes declared — nothing to check." },
+      ],
+    };
+  }
+);
+
+// ── Tool: placeholder content ─────────────────────────────────────────────────
+server.tool(
+  "check_placeholder_content",
+  "Scan source and Info.plist for content that should never reach review: lorem ipsum, Stripe test keys, YOUR_API_KEY-style template tokens, example.com dead links, and template app names still set as CFBundleDisplayName (Guideline 2.1).",
+  projectPathArg,
+  async ({ projectPath }) => {
+    const findings = await checkPlaceholderContent(projectPath);
+    return { content: [{ type: "text", text: renderFindings(findings) }] };
   }
 );
 
@@ -267,6 +328,32 @@ server.tool(
         ].join("\n");
       });
       return { content: [{ type: "text", text: blocks.join("\n\n") }] };
+    } catch (e) {
+      return ascErrorContent(e);
+    }
+  }
+);
+
+server.tool(
+  "asc_check_submission",
+  "Check the App Store Connect side of readiness for the next version: whether demo credentials are actually filled in for a login-gated app (Guideline 2.1 — the most common avoidable rejection), whether App Review notes exist, and whether the required iPhone screenshot sets have anything in them. Complements the local `preflight`, which can only see the binary.",
+  {
+    appId: z.string().describe("App Store Connect app id (from asc_list_apps)."),
+  },
+  async ({ appId }) => {
+    try {
+      const r = await checkSubmission(await ascToken(), appId);
+      const header = r.version
+        ? `🩺 App Store Connect check — version ${r.version.versionString} (${r.version.state})`
+        : "🩺 App Store Connect check";
+      const body = r.findings
+        .map((f) => {
+          const lines = [`${ICON[f.severity]} ${f.title}`, `   ${f.detail}`];
+          if (f.fix) lines.push(`   💡 ${f.fix}`);
+          return lines.join("\n");
+        })
+        .join("\n\n");
+      return { content: [{ type: "text", text: `${header}\n\n${body}` }] };
     } catch (e) {
       return ascErrorContent(e);
     }

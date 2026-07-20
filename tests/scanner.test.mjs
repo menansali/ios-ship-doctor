@@ -11,12 +11,14 @@ import {
   insertPlistKey,
   applyAutoFixes,
   buildPrivacyManifestXml,
+  stripComments,
 } from "../dist/scanner.js";
 import { buildAscJwt, extractGuidelines } from "../dist/appstore.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BAD = join(HERE, "fixtures", "BadApp");
 const GOOD = join(HERE, "fixtures", "GoodApp");
+const WEBPAY = join(HERE, "fixtures", "WebPayApp");
 
 const errorChecks = (findings) => new Set(findings.filter((f) => f.severity === "error").map((f) => f.check));
 
@@ -45,6 +47,59 @@ test("subscription app without legal links is flagged for both privacy policy an
   assert.ok(legal.some((f) => /App Store Connect description/.test(f.title)));
   // account creation implies the 5.1.1(v) deletion requirement
   assert.ok(findings.some((f) => f.check === "account-deletion"));
+});
+
+test("account-based app is flagged for demo credentials, deletion and Sign in with Apple", async () => {
+  const { findings } = await runPreflight(BAD);
+  const byCheck = (name) => findings.filter((f) => f.check === name);
+  assert.ok(byCheck("demo-account").some((f) => f.severity === "warning"), "demo account reminder");
+  assert.ok(byCheck("account-deletion").length === 1, "5.1.1(v) account deletion");
+  const apple = byCheck("sign-in-with-apple");
+  assert.ok(apple.some((f) => f.severity === "error" && /GIDSignIn/.test(f.title)), "4.8 error");
+});
+
+test("background modes without matching API use are flagged", async () => {
+  const { findings } = await runPreflight(BAD);
+  const modes = findings.filter((f) => f.check === "background-modes");
+  // BadApp declares location + audio and implements neither
+  assert.equal(modes.length, 2);
+  assert.ok(modes.every((f) => f.severity === "warning"));
+  assert.ok(modes.some((f) => /"location"/.test(f.title)));
+  assert.ok(modes.some((f) => /"audio"/.test(f.title)));
+});
+
+test("placeholder content is caught in source and Info.plist", async () => {
+  const { findings } = await runPreflight(BAD);
+  const titles = findings.filter((f) => f.check === "placeholder-content").map((f) => f.title);
+  assert.ok(titles.some((t) => /Lorem ipsum/i.test(t)), `expected lorem ipsum, got: ${titles.join(" | ")}`);
+  assert.ok(titles.some((t) => /Unfilled configuration/.test(t)), "expected YOUR_API_KEY");
+  assert.ok(titles.some((t) => /Placeholder support email/.test(t)), "expected test@example.com");
+});
+
+test("external payments without StoreKit are flagged; alongside StoreKit they are not", async () => {
+  const web = await runPreflight(WEBPAY);
+  const pay = web.findings.filter((f) => f.check === "external-payments");
+  assert.equal(pay.length, 1);
+  assert.equal(pay[0].severity, "warning");
+  assert.match(pay[0].title, /StripePaymentSheet/);
+
+  // BadApp has StoreKit and no external processor → no warning at all
+  const bad = await runPreflight(BAD);
+  assert.equal(bad.findings.filter((f) => f.check === "external-payments").length, 0);
+});
+
+test("template app name and Stripe test key are caught", async () => {
+  const { findings } = await runPreflight(WEBPAY);
+  const titles = findings.filter((f) => f.check === "placeholder-content").map((f) => f.title);
+  assert.ok(titles.some((t) => /template name "MyApp"/.test(t)), `got: ${titles.join(" | ")}`);
+  assert.ok(titles.some((t) => /Stripe TEST API key/.test(t)));
+});
+
+test("stripComments removes comments but never breaks URLs", () => {
+  assert.equal(stripComments("let x = 1 // uses StoreKit\n").trim(), "let x = 1");
+  assert.equal(stripComments("/* uses StoreKit */ let y = 2").trim(), "let y = 2");
+  // the // in a URL must survive — it's the evidence the link checks look for
+  assert.match(stripComments('let u = "https://acme.dev/privacy"'), /https:\/\/acme\.dev\/privacy/);
 });
 
 test("insertPlistKey inserts once and is idempotent", () => {

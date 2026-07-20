@@ -7,5 +7,5 @@ class AppDelegate: NSObject {
     var camera: AVCaptureDevice?
 
     // Settings screen links out to the privacy policy (required for every app).
-    let privacyPolicyURL = URL(string: "https://example.com/privacy")!
+    let privacyPolicyURL = URL(string: "https://goodapp.dev/privacy")!
 }
