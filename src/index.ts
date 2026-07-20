@@ -5,7 +5,7 @@ import { writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { z } from "zod";
-import { CLIENTS, renderClientConfig, stableNodePath } from "./clients.js";
+import { CLIENTS, renderClientConfig, stableNodePath, resolveLauncher } from "./clients.js";
 import {
   scanPrivacyManifest,
   checkUsageDescriptions,
@@ -411,13 +411,14 @@ if (argv[0] === "preflight") {
 if (argv[0] === "config") {
   const serverPath = fileURLToPath(import.meta.url);
   const nodePath = stableNodePath(process.execPath, (p) => existsSync(p));
+  const launcher = resolveLauncher(nodePath, serverPath);
   const which = argv[1];
   const chosen = which ? CLIENTS.filter((c) => c.id === which) : CLIENTS;
   if (chosen.length === 0) {
     console.error(`Unknown client "${which}". Known: ${CLIENTS.map((c) => c.id).join(", ")}`);
     process.exit(1);
   }
-  console.log(chosen.map((c) => renderClientConfig(c, nodePath, serverPath)).join("\n\n" + "─".repeat(70) + "\n\n"));
+  console.log(chosen.map((c) => renderClientConfig(c, launcher)).join("\n\n" + "─".repeat(70) + "\n\n"));
   process.exit(0);
 }
 if (argv[0] === "--help" || argv[0] === "-h") {

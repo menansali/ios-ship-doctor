@@ -16,7 +16,7 @@ import {
   parsePlistEntries,
 } from "../dist/scanner.js";
 import { buildAscJwt, extractGuidelines } from "../dist/appstore.js";
-import { CLIENTS, renderClientConfig, stableNodePath } from "../dist/clients.js";
+import { CLIENTS, renderClientConfig, stableNodePath, resolveLauncher } from "../dist/clients.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BAD = join(HERE, "fixtures", "BadApp");
@@ -214,29 +214,39 @@ test("generated privacy manifest is well-formed XML and covers detected APIs", a
 });
 
 test("every client config snippet is valid and correctly shaped", () => {
-  const NODE = "/usr/local/bin/node";
-  const SERVER = "/srv/ios-ship-doctor/dist/index.js";
+  const L = { command: "/usr/local/bin/node", args: ["/srv/ios-ship-doctor/dist/index.js"] };
 
   for (const c of CLIENTS) {
-    const out = renderClientConfig(c, NODE, SERVER);
-    assert.ok(out.includes(SERVER), `${c.id}: must reference the server path`);
+    const out = renderClientConfig(c, L);
+    assert.ok(out.includes(L.args[0]), `${c.id}: must reference the server path`);
     // Credentials must not be pre-baked: a literal ${VAR} from a client that
     // doesn't expand it reaches the server as a real-looking key and 401s.
     assert.doesNotMatch(out.split("# Optional")[0], /\$\{ASC_/, `${c.id}: no unexpanded env placeholders`);
   }
 
   const byId = Object.fromEntries(CLIENTS.map((c) => [c.id, c]));
-  const parse = (id) => JSON.parse(byId[id].render(NODE, SERVER));
+  const parse = (id) => JSON.parse(byId[id].render(L));
   assert.ok(parse("cursor").mcpServers["ios-ship-doctor"], "cursor uses mcpServers");
   assert.ok(parse("vscode").servers["ios-ship-doctor"], "VS Code uses servers, not mcpServers");
   assert.equal(parse("vscode").servers["ios-ship-doctor"].type, "stdio");
   // Zed nests the binary under command.path instead of a bare command string.
-  assert.equal(parse("zed").context_servers["ios-ship-doctor"].command.path, NODE);
+  assert.equal(parse("zed").context_servers["ios-ship-doctor"].command.path, L.command);
 
   // Codex is TOML and the underscore matters — "mcp-servers" is ignored silently.
-  const codex = byId.codex.render(NODE, SERVER);
+  const codex = byId.codex.render(L);
   assert.match(codex, /^\[mcp_servers\.ios-ship-doctor\]$/m);
   assert.doesNotMatch(codex, /\[mcp-servers/);
+});
+
+test("config uses npx when run from an installed package, absolute path from a clone", () => {
+  // Ephemeral npx cache path / installed node_modules → durable npx form.
+  const npx = resolveLauncher("/usr/bin/node", "/Users/x/.npm/_npx/abc123/node_modules/ios-ship-doctor-mcp/dist/index.js");
+  assert.deepEqual(npx, { command: "npx", args: ["-y", "ios-ship-doctor-mcp"] });
+  const global = resolveLauncher("/usr/bin/node", "/usr/lib/node_modules/ios-ship-doctor-mcp/dist/index.js");
+  assert.equal(global.command, "npx");
+  // A working copy keeps the absolute path so clone-and-build still works.
+  const local = resolveLauncher("/opt/homebrew/bin/node", "/Users/x/Desktop/ios-ship-doctor/dist/index.js");
+  assert.deepEqual(local, { command: "/opt/homebrew/bin/node", args: ["/Users/x/Desktop/ios-ship-doctor/dist/index.js"] });
 });
 
 test("generated node path avoids version-pinned installs", () => {

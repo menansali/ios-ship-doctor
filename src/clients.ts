@@ -5,8 +5,14 @@
  * one assistant. The only thing that differs between clients is where the
  * config file lives and what the root key is called, which is exactly the part
  * people get wrong. `ios-ship-doctor-mcp config <client>` prints the right
- * shape with the absolute path already filled in.
+ * shape with the launch command already filled in.
  */
+
+/** How a client should spawn the server: an executable plus its arguments. */
+export interface Launcher {
+  command: string;
+  args: string[];
+}
 
 export interface ClientConfig {
   id: string;
@@ -14,9 +20,9 @@ export interface ClientConfig {
   /** Where the config file lives. */
   path: string;
   /** Rendered snippet. */
-  render: (nodePath: string, serverPath: string) => string;
+  render: (l: Launcher) => string;
   /** Optional one-line alternative (a CLI that writes the config for you). */
-  cli?: (nodePath: string, serverPath: string) => string;
+  cli?: (l: Launcher) => string;
   note?: string;
 }
 
@@ -32,73 +38,75 @@ export const ASC_ENV_HINT = [
   "# Paste real values; most clients do not expand shell variables here.",
 ].join("\n");
 
-const jsonBlock = (rootKey: string, node: string, server: string, extra: Record<string, unknown> = {}) =>
+const jsonBlock = (rootKey: string, l: Launcher, extra: Record<string, unknown> = {}) =>
   JSON.stringify(
-    { [rootKey]: { "ios-ship-doctor": { ...extra, command: node, args: [server] } } },
+    { [rootKey]: { "ios-ship-doctor": { ...extra, command: l.command, args: l.args } } },
     null,
     2
   );
+
+const shell = (l: Launcher) => [l.command, ...l.args].join(" ");
 
 export const CLIENTS: ClientConfig[] = [
   {
     id: "claude",
     label: "Claude Code",
     path: "managed by the CLI (or ~/.claude.json)",
-    cli: (node, server) => `claude mcp add ios-ship-doctor -- ${node} ${server}`,
-    render: (node, server) => jsonBlock("mcpServers", node, server),
+    cli: (l) => `claude mcp add ios-ship-doctor -- ${shell(l)}`,
+    render: (l) => jsonBlock("mcpServers", l),
   },
   {
     id: "gemini",
     label: "Gemini CLI",
     path: "~/.gemini/settings.json  (or .gemini/settings.json in a project)",
-    cli: (node, server) => `gemini mcp add ios-ship-doctor ${node} ${server}`,
-    render: (node, server) => jsonBlock("mcpServers", node, server),
+    cli: (l) => `gemini mcp add ios-ship-doctor ${shell(l)}`,
+    render: (l) => jsonBlock("mcpServers", l),
   },
   {
     id: "codex",
     label: "OpenAI Codex CLI",
     path: "~/.codex/config.toml  (or .codex/config.toml in a trusted project)",
     note: 'The table MUST be "mcp_servers" with an underscore — "mcp-servers" is silently ignored.',
-    render: (node, server) =>
+    render: (l) =>
       [
         "[mcp_servers.ios-ship-doctor]",
-        `command = "${node}"`,
-        `args = ["${server}"]`,
+        `command = "${l.command}"`,
+        `args = [${l.args.map((a) => `"${a}"`).join(", ")}]`,
         "startup_timeout_sec = 30",
-        "# env = { ASC_KEY_ID = \"…\", ASC_ISSUER_ID = \"…\", ASC_PRIVATE_KEY_PATH = \"…\" }",
+        '# env = { ASC_KEY_ID = "…", ASC_ISSUER_ID = "…", ASC_PRIVATE_KEY_PATH = "…" }',
       ].join("\n"),
   },
   {
     id: "cursor",
     label: "Cursor",
     path: "~/.cursor/mcp.json  (global) or .cursor/mcp.json (per project)",
-    render: (node, server) => jsonBlock("mcpServers", node, server),
+    render: (l) => jsonBlock("mcpServers", l),
   },
   {
     id: "vscode",
     label: "VS Code (GitHub Copilot)",
     path: ".vscode/mcp.json",
     note: 'VS Code uses "servers", not "mcpServers", and wants an explicit type.',
-    render: (node, server) => jsonBlock("servers", node, server, { type: "stdio" }),
+    render: (l) => jsonBlock("servers", l, { type: "stdio" }),
   },
   {
     id: "windsurf",
     label: "Windsurf",
     path: "~/.codeium/windsurf/mcp_config.json",
-    render: (node, server) => jsonBlock("mcpServers", node, server),
+    render: (l) => jsonBlock("mcpServers", l),
   },
   {
     id: "zed",
     label: "Zed",
     path: "Zed settings.json",
-    note: 'Zed nests the executable under command.path — a different shape from every other client.',
-    render: (node, server) =>
+    note: "Zed nests the executable under command.path — a different shape from every other client.",
+    render: (l) =>
       JSON.stringify(
         {
           context_servers: {
             "ios-ship-doctor": {
               source: "custom",
-              command: { path: node, args: [server], env: {} },
+              command: { path: l.command, args: l.args, env: {} },
             },
           },
         },
@@ -111,16 +119,31 @@ export const CLIENTS: ClientConfig[] = [
     label: "Any other MCP client",
     path: "wherever that client keeps its MCP config",
     note: "Standard stdio transport, protocol 2025-06-18. If a client speaks MCP, this works.",
-    render: (node, server) => jsonBlock("mcpServers", node, server),
+    render: (l) => jsonBlock("mcpServers", l),
   },
 ];
 
-export function renderClientConfig(c: ClientConfig, nodePath: string, serverPath: string): string {
+export function renderClientConfig(c: ClientConfig, l: Launcher): string {
   const lines = [`# ${c.label}`, `# config file: ${c.path}`];
   if (c.note) lines.push(`# note: ${c.note}`);
-  if (c.cli) lines.push("", `# one-liner:`, c.cli(nodePath, serverPath));
-  lines.push("", c.render(nodePath, serverPath), "", ASC_ENV_HINT);
+  if (c.cli) lines.push("", `# one-liner:`, c.cli(l));
+  lines.push("", c.render(l), "", ASC_ENV_HINT);
   return lines.join("\n");
+}
+
+/**
+ * Decide how a client should launch this server.
+ *
+ * If we're running from an installed package (node_modules) or npx's ephemeral
+ * cache, the absolute path to index.js is either version-pinned or temporary and
+ * will rot — so emit the durable `npx -y ios-ship-doctor-mcp` form instead. When
+ * running from a working copy (clone + build), keep the absolute path.
+ */
+export function resolveLauncher(nodePath: string, serverPath: string): Launcher {
+  if (/[\\/]node_modules[\\/]|[\\/]_npx[\\/]/.test(serverPath)) {
+    return { command: "npx", args: ["-y", "ios-ship-doctor-mcp"] };
+  }
+  return { command: nodePath, args: [serverPath] };
 }
 
 /**

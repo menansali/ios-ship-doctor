@@ -34,25 +34,35 @@ Each one costs you a submission cycle — hours or days of round-trips. Ship Doc
 
 ## Quickstart
 
+No install needed — `npx` fetches and runs it:
+
+```bash
+npx -y ios-ship-doctor-mcp preflight /path/to/your/app
+```
+
+Then wire it into whichever assistant you use. This is a standard stdio MCP server — it is **not** Claude-specific and works with any MCP client. Let it print the exact config for yours:
+
+```bash
+npx -y ios-ship-doctor-mcp config              # every client
+npx -y ios-ship-doctor-mcp config gemini       # just one
+```
+
+<details>
+<summary>Or clone and build from source</summary>
+
 ```bash
 git clone https://github.com/menansali/ios-ship-doctor.git
 cd ios-ship-doctor
 npm install && npm run build
 npm link           # exposes the `ios-ship-doctor-mcp` command
 ```
-
-Then wire it into whichever assistant you use. This is a standard stdio MCP server — it is **not** Claude-specific and works with any MCP client. Let it print the exact config for yours:
-
-```bash
-ios-ship-doctor-mcp config              # every client
-ios-ship-doctor-mcp config gemini       # just one
-```
+</details>
 
 Supported out of the box: `claude`, `gemini`, `codex`, `cursor`, `vscode`, `windsurf`, `zed`, `generic`.
 
 | Client | Config file | Root key |
 |---|---|---|
-| Claude Code | `claude mcp add ios-ship-doctor -- ios-ship-doctor-mcp` | `mcpServers` |
+| Claude Code | `claude mcp add ios-ship-doctor -- npx -y ios-ship-doctor-mcp` | `mcpServers` |
 | Gemini CLI | `~/.gemini/settings.json` (or `gemini mcp add …`) | `mcpServers` |
 | OpenAI Codex CLI | `~/.codex/config.toml` | `[mcp_servers.…]` ⚠️ underscore |
 | Cursor | `~/.cursor/mcp.json` or `.cursor/mcp.json` | `mcpServers` |
@@ -179,8 +189,8 @@ If you'd rather not use `npm link`, point your client at the built file directly
 The same binary runs as a one-shot command that exits non-zero on blocking issues:
 
 ```bash
-ios-ship-doctor-mcp preflight /path/to/app          # human-readable
-ios-ship-doctor-mcp preflight /path/to/app --json   # machine-readable
+npx -y ios-ship-doctor-mcp preflight /path/to/app          # human-readable
+npx -y ios-ship-doctor-mcp preflight /path/to/app --json   # machine-readable
 ```
 
 Copy [`examples/preflight-gate.yml`](./examples/preflight-gate.yml) into your app repo's `.github/workflows/` to **block PRs that would fail App Store review**.
