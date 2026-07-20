@@ -171,6 +171,12 @@ export const GUIDELINE_MAP: Record<string, { title: string; summary: string; fix
     summary: "Unlocking features/content requires payment via a mechanism other than Apple IAP.",
     fix: "Use StoreKit IAP for digital goods; don't link out to external payment for in-app digital content.",
   },
+  "3.1.2": {
+    title: "Subscriptions",
+    summary:
+      "Auto-renewable subscription app is missing required disclosures: subscription title/length/price, or functional Privacy Policy and Terms of Use (EULA) links — both at the point of purchase AND in the App Store description/metadata.",
+    fix: "Put subscription title, duration and price on the paywall, add tappable Privacy Policy + Terms of Use links there, and repeat both URLs as text in the App Store description plus the App Information fields (Privacy Policy URL, License Agreement).",
+  },
   "4.0": {
     title: "Design",
     summary: "UI is copied, low-quality, or not designed for iOS.",

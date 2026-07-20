@@ -8,6 +8,7 @@ import {
   checkUsageDescriptions,
   auditDependencies,
   checkCredentialTraps,
+  checkLegalLinks,
   buildPrivacyManifestXml,
   applyAutoFixes,
   runPreflight,
@@ -118,6 +119,24 @@ server.tool(
         {
           type: "text",
           text: findings.length ? renderFindings(findings) : "✅ No placeholder/test credentials detected in Info.plist.",
+        },
+      ],
+    };
+  }
+);
+
+// ── Tool: legal links (privacy policy / EULA) ─────────────────────────────────
+server.tool(
+  "check_legal_links",
+  "Check the App Store legal-link requirements: a Privacy Policy link (mandatory for every app) and, for apps with in-app purchases, a Terms of Use (EULA) link — required both at the point of purchase and in the App Store Connect description text (Guideline 3.1.2). Also flags the in-app account-deletion requirement (5.1.1(v)) when account creation is detected.",
+  projectPathArg,
+  async ({ projectPath }) => {
+    const findings = await checkLegalLinks(projectPath);
+    return {
+      content: [
+        {
+          type: "text",
+          text: findings.length ? renderFindings(findings) : "No purchase or account signals found — nothing to check.",
         },
       ],
     };

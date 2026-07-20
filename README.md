@@ -85,6 +85,7 @@ VERDICT: NOT READY — 1 blocking issue will fail App Store review.
 | `check_usage_descriptions` | Camera / location / photos / mic / tracking used with no `NS…UsageDescription` |
 | `audit_dependencies` | Apple-listed SDKs shipping without a `PrivacyInfo.xcprivacy` |
 | `check_credential_traps` | Placeholder / public test credentials in `Info.plist` |
+| `check_legal_links` | Missing Privacy Policy / Terms of Use (EULA) links on a paywall + in the App Store description (3.1.2), and the in-app account-deletion requirement (5.1.1(v)) |
 | `generate_privacy_manifest` | Writes a valid `PrivacyInfo.xcprivacy` covering every detected API |
 | `autofix` | Applies the safe fixes automatically; reports the rest as manual follow-up |
 

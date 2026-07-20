@@ -25,7 +25,7 @@ test("preflight flags every planted issue in BadApp", async () => {
   assert.ok(summary.errors > 0, "should have blocking errors");
   assert.match(summary.verdict, /NOT READY/);
   const errs = errorChecks(findings);
-  for (const expected of ["credential-traps", "privacy-manifest", "usage-descriptions", "deprecated-apis", "app-icon"]) {
+  for (const expected of ["credential-traps", "privacy-manifest", "usage-descriptions", "deprecated-apis", "app-icon", "legal-links"]) {
     assert.ok(errs.has(expected), `expected an error for "${expected}", got: ${[...errs].join(", ")}`);
   }
 });
@@ -34,6 +34,17 @@ test("preflight passes a clean app (GoodApp)", async () => {
   const { findings, summary } = await runPreflight(GOOD);
   assert.equal(summary.errors, 0, `expected 0 errors, got: ${findings.filter((f) => f.severity === "error").map((f) => f.title).join(" | ")}`);
   assert.match(summary.verdict, /READY/);
+});
+
+test("subscription app without legal links is flagged for both privacy policy and EULA", async () => {
+  const { findings } = await runPreflight(BAD);
+  const legal = findings.filter((f) => f.check === "legal-links");
+  assert.ok(legal.some((f) => f.severity === "error" && /Terms of Use/.test(f.title)), "missing EULA error");
+  assert.ok(legal.some((f) => f.severity === "error" && /Privacy Policy/.test(f.title)), "missing privacy policy error");
+  // the App Store Connect description side can't be seen from source — always surfaced
+  assert.ok(legal.some((f) => /App Store Connect description/.test(f.title)));
+  // account creation implies the 5.1.1(v) deletion requirement
+  assert.ok(findings.some((f) => f.check === "account-deletion"));
 });
 
 test("insertPlistKey inserts once and is idempotent", () => {

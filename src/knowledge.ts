@@ -196,6 +196,64 @@ export const CREDENTIAL_TRAPS: CredentialTrap[] = [
   },
 ];
 
+/**
+ * Signals that an app sells digital content through Apple's IAP / subscriptions.
+ * Auto-renewable subscriptions trigger Guideline 3.1.2, which requires functional
+ * links to a privacy policy AND a Terms of Use (EULA) both inside the app (at the
+ * point of purchase) and in the App Store Connect description + metadata fields.
+ */
+export const PURCHASE_SIGNATURES: string[] = [
+  // Apple
+  "StoreKit",
+  "SKProduct",
+  "SKPaymentQueue",
+  "Product.subscription",
+  "Transaction.currentEntitlements",
+  "subscriptionGroupID",
+  // Wrappers / paywall SDKs
+  "RevenueCat",
+  "Purchases.shared",
+  "Purchases.configure",
+  "react-native-iap",
+  "expo-in-app-purchases",
+  "Superwall",
+  "Adapty",
+  "Qonversion",
+  "Glassfy",
+];
+
+/** Signals that the app creates user accounts (Guideline 5.1.1 territory). */
+export const ACCOUNT_SIGNATURES: string[] = [
+  "ASAuthorizationAppleIDProvider",
+  "SignInWithApple",
+  "signInWithApple",
+  "FirebaseAuth",
+  "Auth.auth()",
+  "createUserWithEmail",
+  "signInWithEmail",
+  "supabase.auth",
+  "signUp(",
+  "GIDSignIn",
+];
+
+/** Text/URL patterns that count as a real privacy-policy link in first-party code. */
+export const PRIVACY_LINK_PATTERNS: RegExp[] = [
+  /privacy[\s_-]?policy/i,
+  /https?:\/\/[^\s"')]*privacy/i,
+];
+
+/** Text/URL patterns that count as a real Terms of Use / EULA link. */
+export const TERMS_LINK_PATTERNS: RegExp[] = [
+  /terms[\s_-]?(of[\s_-]?(use|service)|and[\s_-]?conditions)/i,
+  /\bEULA\b/,
+  /apple\.com\/legal\/internet-services\/itunes\/dev\/stdeula/i,
+  /https?:\/\/[^\s"')]*\/(terms|tos)\b/i,
+];
+
+/** Apple's standard EULA — the acceptable default when you have no custom terms. */
+export const APPLE_STANDARD_EULA =
+  "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/";
+
 /** Reason-code metadata for FileTimestamp, used in generated-manifest comments. */
 export const REASON_HINTS: Record<string, string> = {
   "C617.1": "Access timestamps of files inside the app container / group container / CloudKit.",

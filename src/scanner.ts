@@ -6,6 +6,11 @@ import {
   USAGE_DESCRIPTION_RULES,
   CREDENTIAL_TRAPS,
   REASON_HINTS,
+  PURCHASE_SIGNATURES,
+  ACCOUNT_SIGNATURES,
+  PRIVACY_LINK_PATTERNS,
+  TERMS_LINK_PATTERNS,
+  APPLE_STANDARD_EULA,
 } from "./knowledge.js";
 
 /** Severity ordering for report sorting. */
@@ -876,6 +881,107 @@ export async function checkDeploymentTarget(projectPath: string): Promise<Findin
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CHECK 12: Privacy Policy + Terms of Use (EULA) links — Guideline 3.1.2 / 5.1.1
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The single most common *metadata* rejection: an app that sells subscriptions
+ * ships without functional privacy-policy and Terms-of-Use links — in the app
+ * at the point of purchase, and in the App Store Connect description.
+ *
+ * We can only see the binary side from source, so the App Store Connect side is
+ * always reported as a manual confirmation when purchases are detected.
+ */
+export async function checkLegalLinks(projectPath: string): Promise<Finding[]> {
+  const layout = await resolveLayout(projectPath);
+  const findings: Finding[] = [];
+
+  // Gather first-party source plus the dependency manifests (SDK names live there).
+  const dirs = [layout.appSourceDir, layout.iosRoot].filter(Boolean) as string[];
+  const texts: string[] = [];
+  const seen = new Set<string>();
+  for (const dir of dirs) {
+    for (const f of await collectSourceFiles(dir)) {
+      if (seen.has(f)) continue;
+      seen.add(f);
+      texts.push(await safeRead(f));
+    }
+  }
+  for (const manifest of ["Podfile", "Package.swift", "../package.json", "package.json"]) {
+    texts.push(await safeRead(join(layout.iosRoot, manifest)));
+  }
+  const blob = texts.join("\n");
+  if (!blob.trim()) return [];
+
+  const sellsSubscriptions = PURCHASE_SIGNATURES.some((s) => blob.includes(s));
+  const hasAccounts = ACCOUNT_SIGNATURES.some((s) => blob.includes(s));
+  const hasPrivacyLink = PRIVACY_LINK_PATTERNS.some((re) => re.test(blob));
+  const hasTermsLink = TERMS_LINK_PATTERNS.some((re) => re.test(blob));
+
+  if (sellsSubscriptions) {
+    if (!hasTermsLink) {
+      findings.push({
+        severity: "error",
+        check: "legal-links",
+        title: "In-app purchases detected, but no Terms of Use (EULA) link anywhere in the app",
+        detail:
+          "Guideline 3.1.2 requires auto-renewable subscriptions to show a functional link to the Terms of Use (EULA) at the point of purchase, AND to repeat that link in the App Store Connect description. Missing it is a routine metadata rejection.",
+        fix: `Add a tappable "Terms of Use" link on the paywall (Apple's standard EULA is fine: ${APPLE_STANDARD_EULA}), and paste the same URL into the App Store description text and the App Store Connect "License Agreement" field.`,
+      });
+    }
+    if (!hasPrivacyLink) {
+      findings.push({
+        severity: "error",
+        check: "legal-links",
+        title: "In-app purchases detected, but no Privacy Policy link anywhere in the app",
+        detail:
+          "Guideline 3.1.2 requires a functional privacy-policy link at the point of purchase as well as in the App Store description.",
+        fix: 'Add a tappable "Privacy Policy" link on the paywall, and include the same URL in the App Store description text.',
+      });
+    }
+    findings.push({
+      severity: "warning",
+      check: "legal-links",
+      title: "Confirm the App Store Connect description contains both legal links",
+      detail:
+        "Ship Doctor can only see the app binary. Reviewers also check the metadata: the description text itself must contain working Privacy Policy and Terms of Use (EULA) URLs, plus subscription title, length, and price. Links only in the app — or only in the ASC URL fields — still get rejected under 3.1.2.",
+      fix: 'In App Store Connect → App Information, fill "Privacy Policy URL" and "License Agreement", and paste both URLs as plain text at the end of the app description.',
+    });
+  } else {
+    if (!hasPrivacyLink) {
+      findings.push({
+        severity: "warning",
+        check: "legal-links",
+        title: "No Privacy Policy link found in the app",
+        detail:
+          "A Privacy Policy URL is mandatory in App Store Connect for every app, and reviewers expect it to be reachable from inside the app too (typically Settings/About).",
+        fix: 'Add a "Privacy Policy" link in-app and set the Privacy Policy URL in App Store Connect → App Information.',
+      });
+    } else {
+      findings.push({
+        severity: "info",
+        check: "legal-links",
+        title: "Privacy Policy link present in the app",
+        detail: "Still confirm the Privacy Policy URL field is filled in App Store Connect — it is required for every app.",
+      });
+    }
+  }
+
+  if (hasAccounts) {
+    findings.push({
+      severity: "warning",
+      check: "account-deletion",
+      title: "App creates user accounts — in-app account deletion is required",
+      detail:
+        "Guideline 5.1.1(v): any app that supports account creation must also let users initiate account deletion from inside the app. A support-email-only flow is rejected.",
+      fix: "Add a 'Delete account' action in the app's settings that deletes the account and its data (not just a sign-out), and mention where it lives in the App Review notes.",
+    });
+  }
+
+  return findings;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Auto-fix: insert a key/value pair into a plist's top-level dict
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -998,7 +1104,7 @@ export async function runPreflight(projectPath: string): Promise<{
   summary: { errors: number; warnings: number; infos: number; verdict: string };
 }> {
   const privacy = await scanPrivacyManifest(projectPath);
-  const [usage, deps, traps, exportComp, ats, icon, deprecated, launch, version, deployment] =
+  const [usage, deps, traps, exportComp, ats, icon, deprecated, launch, version, deployment, legal] =
     await Promise.all([
       checkUsageDescriptions(projectPath),
       auditDependencies(projectPath),
@@ -1010,6 +1116,7 @@ export async function runPreflight(projectPath: string): Promise<{
       checkLaunchScreen(projectPath),
       checkVersionSanity(projectPath),
       checkDeploymentTarget(projectPath),
+      checkLegalLinks(projectPath),
     ]);
 
   const all = [
@@ -1024,6 +1131,7 @@ export async function runPreflight(projectPath: string): Promise<{
     ...launch,
     ...version,
     ...deployment,
+    ...legal,
   ];
   const order: Record<Severity, number> = { error: 0, warning: 1, info: 2 };
   all.sort((a, b) => order[a.severity] - order[b.severity]);
